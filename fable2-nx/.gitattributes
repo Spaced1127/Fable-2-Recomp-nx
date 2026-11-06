@@ -1,0 +1,16 @@
+# Keep build scripts LF on every platform: bash rejects CRLF in `set -o pipefail`.
+*.sh text eol=lf
+*.py text eol=lf
+*.toml text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# Source and docs are fine either way, but normalize to LF for consistency.
+*.md text eol=lf
+*.c text eol=lf
+*.h text eol=lf
+*.cc text eol=lf
+*.cpp text eol=lf
+*.hpp text eol=lf
+*.cmake text eol=lf
+CMakeLists.txt text eol=lf

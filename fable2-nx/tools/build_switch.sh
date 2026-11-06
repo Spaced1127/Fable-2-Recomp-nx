@@ -66,17 +66,27 @@ generate() {
     build_host
   fi
 
+  local rexglue
+  rexglue="$(rexglue_bin)"
+  # The prebuilt Linux rexglue links librexruntime.so from its own directory;
+  # make that work when invoked from any working directory.
+  if [[ -f "$(dirname "${rexglue}")/librexruntime.so" ]]; then
+    export LD_LIBRARY_PATH="$(dirname "${rexglue}")${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+  fi
+
   local stamp="${PORT_DIR}/generated/.xex-sha256"
   local manifest="${PORT_DIR}/fable_2_manifest.toml"
   local hash
-  hash="$(sha256sum "${xex}" "${manifest}" | sha256sum | cut -d' ' -f1)"
+  # Hash the contents, not the paths: moving or renaming the tree must not
+  # invalidate the generated code.
+  hash="$({ sha256sum < "${xex}"; sha256sum < "${manifest}"; } | sha256sum | cut -d' ' -f1)"
   if [[ -f "${stamp}" && "$(cat "${stamp}")" == "${hash}" \
         && -n "$(ls -A "${PORT_DIR}/generated/default" 2>/dev/null)" ]]; then
     echo "== codegen: already generated for this default.xex"
     return 0
   fi
   echo "== codegen"
-  (cd "${PORT_DIR}" && "$(rexglue_bin)" codegen fable_2_manifest.toml)
+  (cd "${PORT_DIR}" && "${rexglue}" codegen fable_2_manifest.toml)
   mkdir -p "${PORT_DIR}/generated"
   printf '%s\n' "${hash}" > "${stamp}"
 }

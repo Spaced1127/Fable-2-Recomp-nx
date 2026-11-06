@@ -91,7 +91,10 @@ tools/build_switch.sh --codegen   # runs codegen, writes port/generated/default
 ```
 
 Codegen takes about a minute and produces ~300 MB of C++ (not committed). The manifest
-is entrypoint-only (Fable II ships no guest DLL modules).
+is entrypoint-only (Fable II ships no guest DLL modules). FFmpeg's generated
+configuration headers (`config.h`, `avconfig.h`, codec/parser lists) are vendored
+under `sdk/thirdparty/FFmpeg`, so a fresh clone needs no separate FFmpeg configure
+step.
 
 ### 4. Build the NRO
 
