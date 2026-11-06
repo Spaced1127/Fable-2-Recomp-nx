@@ -1,0 +1,12 @@
+# fable_2.toml - ReXGlue cvar config (Fable II, Switch)
+#
+# Flat keys only: the SDK's loader turns TOML tables into prefixed names
+# ([Launch] skipHash -> "Launch_skipHash"), so cvars must NOT be under
+# [sections]. fable2_config.toml is a separate file with its own parser.
+
+# GPU emulation: the app defaults this when absent.
+gpu_plugin = "xenos"
+
+# Set true only for a modified or non-catalogue default.xex; the hash is
+# still computed and logged.
+skipHash = false

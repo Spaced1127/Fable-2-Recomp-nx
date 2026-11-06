@@ -1,0 +1,58 @@
+# Game data and generated game code - never commit
+game_files/
+port/default.xex
+port/default_image.bin
+port/generated/
+*.iso
+*.xex
+*.bik
+*.pac
+*.sbk
+*.bnk
+*.gdb
+*.babel
+*.manifest
+*.nro
+*.nsp
+*.xci
+*.elf
+
+# Build outputs
+out/
+sdk/out/
+port/build/
+tools/deko3d/clear_test/build/
+third_party/nvk/
+build/
+_deps/
+*.o
+*.a
+*.so
+*.dll
+*.exe
+*.pdb
+*.dksh
+*.spv
+
+# Local staging and analysis scratch
+stage/
+re/
+shader_dump*/
+*.zip
+
+# Runtime data
+logs/
+saves/
+cache/
+crash_reports/
+*.log
+*.sha256
+
+# Editors / OS
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+Thumbs.db
+desktop.ini

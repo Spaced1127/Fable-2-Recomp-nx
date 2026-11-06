@@ -1,6 +1,11 @@
 # Fable 2 — ReXGlue Recompiled Project
 First and for most this project was made to test the capabilities of local and open source AI. This project was made using Qwen3.8 27b. After about an hour it got the game running. Then after a large amount of human trial and error I was able to get enough of the functions mapped to be able to complete the game. I currently do not consider this to be fully complete as I have yet to 100% the game. The sha256 of the iso that started this project is: "685a0d3bea9718812f17bcd155907a5359a548b6d3d8342dd2a6c944f45e35ff" and its the Fable 2 GOTY for USA and Europe.
 
+> **Nintendo Switch port (this fork):** an experimental ReXGlue/deko3d port of this
+> project to the Nintendo Switch lives in [`fable2-nx/`](fable2-nx/README.md).
+> It builds with devkitA64, contains no game data, and its deko3d backend is in
+> active bring-up. The documentation below describes the upstream Windows project.
+
 Recompilation of Fable 2 (Xbox 360, title ID 4D5307F1) using the [ReXGlue SDK](https://github.com/rexglue/rexglue-sdk) v0.10.0, with the runtime built from [the project's fork](https://github.com/himdo/rexglue-sdk). Guest PPC code is statically recompiled to C++ at build time by `rexglue codegen`, driven by `fable_2_manifest.toml`.
 
 # Important Note:
