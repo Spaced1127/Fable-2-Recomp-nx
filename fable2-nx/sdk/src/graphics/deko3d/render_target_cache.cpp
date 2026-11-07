@@ -311,7 +311,9 @@ bool Deko3DRenderTargetCache::RecordResolveCopy(
   dest.imageHeight = dest_pitch * 4 * height;
   dk::ImageView source_view{*source};
   const DkImageRect source_rect{x, y, 0, copy_width, copy_height, 1};
+  command_buffer_.barrier(DkBarrier_Full, DkInvalidateFlags_Image);
   command_buffer_.copyImageToBuffer(source_view, source_rect, dest);
+  command_buffer_.barrier(DkBarrier_Full, DkInvalidateFlags_L2Cache);
   gpu_written_ranges_.emplace_back(uint32_t(dest_offset), uint32_t(dest_size));
   has_commands_ = true;
   return true;

@@ -321,6 +321,10 @@ Presenter::PaintResult Deko3DPresenter::PaintAndPresentImpl(bool execute_ui_draw
     // images and a copy fence).
     impl_->gpu_cmdbuf.clear();
     impl_->gpu_cmdbuf.addMemory(impl_->gpu_cmd_mem, slot * kCmdSize, kCmdSize);
+    // deko3d has no image layouts; a full barrier orders the acquired
+    // presentable image and the render-target writes before the 2D engine
+    // reads, and invalidates the image cache (plume's copy path does the same).
+    impl_->gpu_cmdbuf.barrier(DkBarrier_Full, DkInvalidateFlags_Image);
     dk::ImageView dst_view{impl_->framebuffers[slot]};
     DkCopyBuf source{};
     source.addr = impl_->guest_gpu_pixels;
@@ -328,6 +332,7 @@ Presenter::PaintResult Deko3DPresenter::PaintAndPresentImpl(bool execute_ui_draw
     source.imageHeight = impl_->guest_gpu_pitch * copy_height;
     const DkImageRect rect{0, 0, 0, copy_width, copy_height, 1};
     impl_->gpu_cmdbuf.copyBufferToImage(source, dst_view, rect);
+    impl_->gpu_cmdbuf.barrier(DkBarrier_Full, DkInvalidateFlags_L2Cache);
     queue.submitCommands(impl_->gpu_cmdbuf.finishList());
     queue.signalFence(impl_->copy_fence, true);
     impl_->copy_pending = true;
