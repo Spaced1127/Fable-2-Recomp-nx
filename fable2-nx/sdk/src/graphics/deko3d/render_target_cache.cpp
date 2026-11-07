@@ -324,7 +324,6 @@ bool Deko3DRenderTargetCache::RecordResolveCopy(
   const DkImageRect source_rect{x, y, 0, copy_width, copy_height, 1};
   command_buffer_.barrier(DkBarrier_Full, DkInvalidateFlags_Image);
   command_buffer_.copyImageToBuffer(source_view, source_rect, dest);
-  command_buffer_.barrier(DkBarrier_Full, DkInvalidateFlags_L2Cache);
   gpu_written_ranges_.emplace_back(uint32_t(dest_offset), uint32_t(dest_size));
   has_commands_ = true;
   return true;
@@ -369,7 +368,10 @@ bool Deko3DRenderTargetCache::Resolve(const draw_util::ResolveInfo& resolve_info
     RenderTargetKey key;
     if (MakeResolveKey(edram_info, key)) {
       if (Target* target = GetOrCreateTarget(key)) {
-        RecordResolveCopy(*target, resolve_info, x, y, width, height);
+        if (RecordResolveCopy(*target, resolve_info, x, y, width, height)) {
+          last_color_resolve_address_ = resolve_info.copy_dest_base;
+          has_color_resolve_ = true;
+        }
       }
     }
   }

@@ -112,7 +112,8 @@ void Deko3DCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
   const uint32_t guest_pitch = display_width * 4;
   DkGpuAddr guest_gpu_pixels = 0;
   uint32_t guest_physical = 0;
-  if (shared_memory_ && frontbuffer_ptr) {
+  if (shared_memory_ && render_target_cache_ &&
+      render_target_cache_->HasResolvedFrontBuffer(frontbuffer_ptr) && frontbuffer_ptr) {
     // Fable's swap pointer (and RB_COPY_DEST_BASE) is a guest *physical*
     // address in the 512 MB GPU range; GetPhysicalAddress would treat it as a
     // virtual address and fail. Use it directly when it fits, and only try a

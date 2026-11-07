@@ -54,6 +54,12 @@ class Deko3DRenderTargetCache final : public RenderTargetCache {
   // for a hard failure (the guest ring should keep advancing regardless).
   bool Resolve(const draw_util::ResolveInfo& resolve_info);
 
+  // Whether a color resolve has written this guest address (the swap front
+  // buffer). The presenter must not read the mirror before that.
+  bool HasResolvedFrontBuffer(uint32_t address) const {
+    return has_color_resolve_ && last_color_resolve_address_ == address;
+  }
+
   // Submits everything recorded since the previous flush and waits for the GPU
   // so the shared-memory mirror is coherent for the presenter.
   bool Flush();
@@ -101,6 +107,8 @@ class Deko3DRenderTargetCache final : public RenderTargetCache {
       targets_;
 
   std::vector<std::pair<uint32_t, uint32_t>> gpu_written_ranges_;
+  uint32_t last_color_resolve_address_ = 0;
+  bool has_color_resolve_ = false;
 };
 
 // A deko3d image for one EDRAM render-target key. Public only so the command

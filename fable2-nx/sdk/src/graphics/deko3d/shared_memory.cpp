@@ -30,8 +30,11 @@ bool Deko3DSharedMemory::Initialize() {
   // One full-size allocation, like the Vulkan backend's non-sparse fallback on
   // devices without sparse binding (including NVK on Tegra). The guest physical
   // address space is 512 MB, so offsets map directly.
+  // GPU-written resolve destinations must be CPU-uncached (SVR2011's deko3d
+  // readback buffers do the same); a cached block leaves the 2D-engine copy
+  // waiting on cache maintenance.
   mem_block_ = dk::MemBlockMaker{device_.device(), kBufferSize}
-                   .setFlags(DkMemBlockFlags_CpuCached | DkMemBlockFlags_GpuCached)
+                   .setFlags(DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached)
                    .create();
   if (!mem_block_) {
     REXGPU_ERROR("Shared memory: failed to allocate the {} MB deko3d block",
@@ -45,10 +48,9 @@ bool Deko3DSharedMemory::Initialize() {
     mem_block_ = nullptr;
     return false;
   }
-  // Starting from a defined state matters before the first resolve; the block
-  // is also what the presenter shows until the game writes the front buffer.
-  std::memset(cpu_address_, 0, kBufferSize);
-  mem_block_.flushCpuCache(0, kBufferSize);
+  // No full-block memset: the 512 MB block is CPU-uncached, and the only
+  // consumer that must not see stale data before a GPU write (the presenter's
+  // front buffer) is gated on a completed resolve by the command processor.
   REXGPU_INFO("Shared memory: {} MB deko3d block at GPU 0x{:016X}", kBufferSize >> 20,
               uint64_t(gpu_address_));
   return true;
@@ -83,11 +85,9 @@ bool Deko3DSharedMemory::UploadRanges(
       return false;
     }
     std::memcpy(cpu_address_ + start, source, clamped_length);
-    if (mem_block_.flushCpuCache(start, clamped_length) != DkResult_Success) {
-      REXGPU_ERROR("Shared memory: flush of 0x{:08X}+0x{:X} failed", start,
-                   clamped_length);
-      return false;
-    }
+    // On a CpuUncached block this is a no-op; keep it for the upload path if
+    // the block ever becomes cached.
+    mem_block_.flushCpuCache(start, clamped_length);
   }
   return true;
 }
