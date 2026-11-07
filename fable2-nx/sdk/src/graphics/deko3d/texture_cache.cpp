@@ -329,8 +329,8 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
   upload_command_buffer_.addMemory(upload_command_memory_, 0, kUploadCommandSize);
   DkCopyBuf source_buffer{};
   source_buffer.addr = staging.getGpuAddr();
-  source_buffer.rowLength = blocks_wide;
-  source_buffer.imageHeight = blocks_high;
+  source_buffer.rowLength = row_bytes;
+  source_buffer.imageHeight = total_bytes;
   dk::ImageView destination_view{deko_texture.image()};
   destination_view.setMipLevels(0, 1);
   const DkImageRect destination_rect{0, 0, 0, width, height, 1};

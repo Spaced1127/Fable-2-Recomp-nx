@@ -28,7 +28,7 @@ namespace rex::ui::deko3d {
 
 namespace {
 
-constexpr unsigned kNumFramebuffers = 2;
+constexpr unsigned kNumFramebuffers = 3;
 constexpr uint32_t kCmdSize = 0x1000;
 
 }  // namespace
@@ -48,6 +48,8 @@ struct Deko3DPresenter::Impl {
   std::array<DkCmdList, kNumFramebuffers> bind_cmdlists{};
   std::array<DkCmdList, kNumFramebuffers> guest_copy_cmdlists{};
   DkCmdList pattern_cmdlist{};
+  dk::Fence copy_fence{};
+  bool copy_pending = false;
   bool connected = false;
   uint32_t width = 0;
   uint32_t height = 0;
@@ -73,6 +75,7 @@ struct Deko3DPresenter::Impl {
     gpu_cmd_mem = nullptr;
     upload_mem = nullptr;
     connected = false;
+    copy_pending = false;
     width = height = 0;
     guest_pixels = nullptr;
     guest_width = guest_height = guest_pitch = 0;
@@ -148,8 +151,10 @@ struct Deko3DPresenter::Impl {
       return false;
     }
     upload_buf.addr = upload_mem.getGpuAddr();
-    upload_buf.rowLength = w;
-    upload_buf.imageHeight = h;
+    // DkCopyBuf.rowLength is bytes per row and imageHeight is the total byte
+    // size (rowLength * rows), matching plume's deko3d backend.
+    upload_buf.rowLength = w * 4;
+    upload_buf.imageHeight = w * 4 * h;
     for (unsigned i = 0; i < kNumFramebuffers; ++i) {
       cmdbuf.addMemory(cmd_mem, (kNumFramebuffers + i) * kCmdSize, kCmdSize);
       dk::ImageView dst_view{framebuffers[i]};
@@ -276,6 +281,19 @@ Presenter::PaintResult Deko3DPresenter::PaintAndPresentImpl(bool execute_ui_draw
   if (!impl_->connected || !impl_->device) {
     return PaintResult::kNotPresented;
   }
+  // HOME/sleep/capture can stop the display consuming frames; queueing into
+  // the window then blocks the game thread. Pause presentation until focus is
+  // back, as the SVR2011 deko3d backend does.
+  if (appletGetFocusState() != AppletFocusState_InFocus) {
+    return PaintResult::kNotPresented;
+  }
+  // The previous frame's copy must be finished before its command slot is
+  // reused. The fence signs after the copy and before the present, so a paused
+  // display (HOME, capture) does not hold this wait.
+  if (impl_->copy_pending) {
+    impl_->copy_fence.wait();
+    impl_->copy_pending = false;
+  }
   std::lock_guard dev_lock(impl_->device->submit_mutex());
   dk::Queue queue = impl_->device->queue();
   const int slot = queue.acquireImage(impl_->swapchain);
@@ -297,19 +315,22 @@ Presenter::PaintResult Deko3DPresenter::PaintAndPresentImpl(bool execute_ui_draw
                   uint64_t(impl_->guest_gpu_pixels), impl_->guest_gpu_pitch, copy_width,
                   copy_height);
     }
-    // Reuse is safe: the previous copy list has completed (Flush in IssueSwap
-    // waited for the queue) and this is the only writer of this command slot.
-    queue.waitIdle();
+    // The copy fence, not a queue-wide idle wait, gates command-list reuse:
+    // queue.waitIdle also waits for the present, which deadlocks with a held
+    // window buffer (the same failure SVR2011 fixed with three swapchain
+    // images and a copy fence).
     impl_->gpu_cmdbuf.clear();
     impl_->gpu_cmdbuf.addMemory(impl_->gpu_cmd_mem, slot * kCmdSize, kCmdSize);
     dk::ImageView dst_view{impl_->framebuffers[slot]};
     DkCopyBuf source{};
     source.addr = impl_->guest_gpu_pixels;
-    source.rowLength = impl_->guest_gpu_pitch / 4;
-    source.imageHeight = copy_height;
+    source.rowLength = impl_->guest_gpu_pitch;
+    source.imageHeight = impl_->guest_gpu_pitch * copy_height;
     const DkImageRect rect{0, 0, 0, copy_width, copy_height, 1};
     impl_->gpu_cmdbuf.copyBufferToImage(source, dst_view, rect);
     queue.submitCommands(impl_->gpu_cmdbuf.finishList());
+    queue.signalFence(impl_->copy_fence, true);
+    impl_->copy_pending = true;
     if (logged_gpu_copy) {
       // Only the first frame reaches this diagnostic (logged_gpu_copy is set
       // above); keep it so the log proves the copy list was submitted.

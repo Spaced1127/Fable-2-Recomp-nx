@@ -149,9 +149,12 @@ bool Deko3DRenderTargetCache::EnsureRecording() {
   if (!command_buffer_ || !command_memory_) {
     return false;
   }
-  // The previous resolve list is still using the command memory. Wait for it
-  // (the queue is idle by the time the presenter has finished anyway).
-  device_.WaitIdle();
+  // The previous resolve list is still using the command memory. Wait for its
+  // fence (not queue-wide idle, which would also wait for the present).
+  if (resolve_pending_) {
+    resolve_fence_.wait();
+    resolve_pending_ = false;
+  }
   static bool logged_record_start = false;
   if (!logged_record_start) {
     logged_record_start = true;
@@ -177,8 +180,13 @@ bool Deko3DRenderTargetCache::Flush() {
   {
     std::lock_guard lock(device_.submit_mutex());
     device_.queue().submitCommands(list);
-    device_.queue().waitIdle();
+    device_.queue().signalFence(resolve_fence_, true);
+    resolve_pending_ = true;
   }
+  // The fence is signaled after the resolve commands and before the presenter
+  // submits its copy, so this waits for the resolves only, never the present.
+  resolve_fence_.wait();
+  resolve_pending_ = false;
   for (const std::pair<uint32_t, uint32_t>& range : gpu_written_ranges_) {
     shared_memory_.RangeWrittenByGpu(range.first, range.second);
   }
@@ -299,8 +307,8 @@ bool Deko3DRenderTargetCache::RecordResolveCopy(
   }
   DkCopyBuf dest{};
   dest.addr = shared_memory_.gpu_address() + dest_offset;
-  dest.rowLength = dest_pitch;
-  dest.imageHeight = height;
+  dest.rowLength = dest_pitch * 4;
+  dest.imageHeight = dest_pitch * 4 * height;
   dk::ImageView source_view{*source};
   const DkImageRect source_rect{x, y, 0, copy_width, copy_height, 1};
   command_buffer_.copyImageToBuffer(source_view, source_rect, dest);

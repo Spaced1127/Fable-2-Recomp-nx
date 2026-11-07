@@ -92,6 +92,8 @@ class Deko3DRenderTargetCache final : public RenderTargetCache {
 
   dk::UniqueCmdBuf command_buffer_;
   dk::UniqueMemBlock command_memory_;
+  dk::Fence resolve_fence_{};
+  bool resolve_pending_ = false;
   bool recording_ = false;
   bool has_commands_ = false;
 
