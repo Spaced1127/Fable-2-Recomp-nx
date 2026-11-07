@@ -152,6 +152,11 @@ bool Deko3DRenderTargetCache::EnsureRecording() {
   // The previous resolve list is still using the command memory. Wait for it
   // (the queue is idle by the time the presenter has finished anyway).
   device_.WaitIdle();
+  static bool logged_record_start = false;
+  if (!logged_record_start) {
+    logged_record_start = true;
+    REXGPU_INFO("deko3d: render target recording started");
+  }
   command_buffer_.clear();
   command_buffer_.addMemory(command_memory_, 0, command_memory_.getSize());
   recording_ = true;

@@ -38,8 +38,10 @@ struct Deko3DPresenter::Impl {
   Deko3DDevice* device = nullptr;
   dk::UniqueSwapchain swapchain;
   dk::UniqueCmdBuf cmdbuf;
+  dk::UniqueCmdBuf gpu_cmdbuf;
   dk::UniqueMemBlock fb_mem;
   dk::UniqueMemBlock cmd_mem;
+  dk::UniqueMemBlock gpu_cmd_mem;
   dk::UniqueMemBlock upload_mem;
   DkCopyBuf upload_buf{};
   std::array<dk::Image, kNumFramebuffers> framebuffers{};
@@ -65,8 +67,10 @@ struct Deko3DPresenter::Impl {
     }
     swapchain = nullptr;
     cmdbuf = nullptr;
+    gpu_cmdbuf = nullptr;
     fb_mem = nullptr;
     cmd_mem = nullptr;
+    gpu_cmd_mem = nullptr;
     upload_mem = nullptr;
     connected = false;
     width = height = 0;
@@ -116,6 +120,14 @@ struct Deko3DPresenter::Impl {
     cmdbuf = dk::CmdBufMaker{dk_device}.create();
     if (!cmdbuf) {
       REXLOG_ERROR("[deko3d] command buffer creation failed");
+      return false;
+    }
+    gpu_cmd_mem = dk::MemBlockMaker{dk_device, kCmdSize * kNumFramebuffers}
+                      .setFlags(DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached)
+                      .create();
+    gpu_cmdbuf = dk::CmdBufMaker{dk_device}.create();
+    if (!gpu_cmd_mem || !gpu_cmdbuf) {
+      REXLOG_ERROR("[deko3d] GPU present command resources creation failed");
       return false;
     }
     for (unsigned i = 0; i < kNumFramebuffers; ++i) {
@@ -278,19 +290,35 @@ Presenter::PaintResult Deko3DPresenter::PaintAndPresentImpl(bool execute_ui_draw
         impl_->guest_width < impl_->width ? impl_->guest_width : impl_->width;
     const uint32_t copy_height =
         impl_->guest_height < impl_->height ? impl_->guest_height : impl_->height;
+    static bool logged_gpu_copy = false;
+    if (!logged_gpu_copy) {
+      logged_gpu_copy = true;
+      REXLOG_INFO("[deko3d] gpu present copy: src 0x{:016X} pitch {} {}x{}",
+                  uint64_t(impl_->guest_gpu_pixels), impl_->guest_gpu_pitch, copy_width,
+                  copy_height);
+    }
     // Reuse is safe: the previous copy list has completed (Flush in IssueSwap
     // waited for the queue) and this is the only writer of this command slot.
     queue.waitIdle();
-    const uint32_t slot_offset = kNumFramebuffers * 2 * kCmdSize + kCmdSize;
-    impl_->cmdbuf.addMemory(impl_->cmd_mem, slot_offset, kCmdSize);
+    impl_->gpu_cmdbuf.clear();
+    impl_->gpu_cmdbuf.addMemory(impl_->gpu_cmd_mem, slot * kCmdSize, kCmdSize);
     dk::ImageView dst_view{impl_->framebuffers[slot]};
     DkCopyBuf source{};
     source.addr = impl_->guest_gpu_pixels;
     source.rowLength = impl_->guest_gpu_pitch / 4;
     source.imageHeight = copy_height;
     const DkImageRect rect{0, 0, 0, copy_width, copy_height, 1};
-    impl_->cmdbuf.copyBufferToImage(source, dst_view, rect);
-    queue.submitCommands(impl_->cmdbuf.finishList());
+    impl_->gpu_cmdbuf.copyBufferToImage(source, dst_view, rect);
+    queue.submitCommands(impl_->gpu_cmdbuf.finishList());
+    if (logged_gpu_copy) {
+      // Only the first frame reaches this diagnostic (logged_gpu_copy is set
+      // above); keep it so the log proves the copy list was submitted.
+      static bool logged_submit = false;
+      if (!logged_submit) {
+        logged_submit = true;
+        REXLOG_INFO("[deko3d] gpu present copy submitted");
+      }
+    }
   } else if (has_guest_output) {
     const uint32_t copy_width =
         impl_->guest_width < impl_->width ? impl_->guest_width : impl_->width;
