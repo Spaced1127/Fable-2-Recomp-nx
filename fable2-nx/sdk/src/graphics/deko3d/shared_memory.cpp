@@ -31,8 +31,7 @@ bool Deko3DSharedMemory::Initialize() {
   // devices without sparse binding (including NVK on Tegra). The guest physical
   // address space is 512 MB, so offsets map directly.
   mem_block_ = dk::MemBlockMaker{device_.device(), kBufferSize}
-                   .setFlags(DkMemBlockFlags_CpuCached | DkMemBlockFlags_GpuCached |
-                             DkMemBlockFlags_ZeroFillInit)
+                   .setFlags(DkMemBlockFlags_CpuCached | DkMemBlockFlags_GpuCached)
                    .create();
   if (!mem_block_) {
     REXGPU_ERROR("Shared memory: failed to allocate the {} MB deko3d block",
@@ -46,6 +45,10 @@ bool Deko3DSharedMemory::Initialize() {
     mem_block_ = nullptr;
     return false;
   }
+  // Starting from a defined state matters before the first resolve; the block
+  // is also what the presenter shows until the game writes the front buffer.
+  std::memset(cpu_address_, 0, kBufferSize);
+  mem_block_.flushCpuCache(0, kBufferSize);
   REXGPU_INFO("Shared memory: {} MB deko3d block at GPU 0x{:016X}", kBufferSize >> 20,
               uint64_t(gpu_address_));
   return true;

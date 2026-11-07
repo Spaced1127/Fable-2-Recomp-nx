@@ -271,6 +271,9 @@ bool Deko3DRenderTargetCache::RecordResolveCopy(
   if (!source) {
     return false;
   }
+  if (x >= target.width() || y >= target.height()) {
+    return false;
+  }
   const uint32_t copy_width = std::min(width, target.width() - x);
   const uint32_t copy_height = std::min(height, target.height() - y);
   if (!copy_width || !copy_height) {
