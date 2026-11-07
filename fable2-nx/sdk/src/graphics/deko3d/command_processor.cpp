@@ -125,13 +125,23 @@ void Deko3DCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
   }
   const uint32_t guest_pitch = display_width * 4;
   DkGpuAddr guest_gpu_pixels = 0;
+  uint32_t guest_physical = 0;
   if (shared_memory_ && frontbuffer_ptr) {
-    const uint32_t physical = memory_->GetPhysicalAddress(frontbuffer_ptr);
-    const uint64_t offset = physical;
+    guest_physical = memory_->GetPhysicalAddress(frontbuffer_ptr);
+    const uint64_t offset = guest_physical;
     const uint64_t byte_size = uint64_t(display_width) * display_height * 4;
     if (offset + byte_size <= SharedMemory::kBufferSize) {
       guest_gpu_pixels = shared_memory_->gpu_address() + offset;
     }
+  }
+  static bool logged_swap = false;
+  if (!logged_swap) {
+    logged_swap = true;
+    REXGPU_INFO(
+        "deko3d: first swap: frontbuffer 0x{:08X} ({}x{}), physical 0x{:08X}, "
+        "gpu 0x{:016X}, shared {}",
+        frontbuffer_ptr, display_width, display_height, guest_physical,
+        uint64_t(guest_gpu_pixels), shared_memory_ != nullptr);
   }
   const bool refreshed = presenter->RefreshGuestOutput(
       display_width, display_height, display_width, display_height,
@@ -169,10 +179,21 @@ bool Deko3DCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   (void)index_count;
   (void)index_buffer_info;
   (void)major_mode_explicit;
+  // Resolves are submitted as draw packets with EDRAM copy mode (the Vulkan and
+  // D3D12 backends dispatch the same way). Without this check the guest's
+  // resolve draws are silently dropped.
+  if (register_file_->Get<reg::RB_MODECONTROL>().edram_mode == xenos::EdramMode::kCopy) {
+    return IssueCopy();
+  }
   return true;
 }
 
 bool Deko3DCommandProcessor::IssueCopy() {
+  static bool logged_entry = false;
+  if (!logged_entry) {
+    logged_entry = true;
+    REXGPU_INFO("deko3d: first resolve draw/copy");
+  }
   if (!render_target_cache_) {
     return true;
   }
