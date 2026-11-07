@@ -90,7 +90,7 @@ struct Deko3DPresenter::Impl {
     dk::ImageLayout layout;
     dk::ImageLayoutMaker{dk_device}
         .setFlags(DkImageFlags_UsageRender | DkImageFlags_UsagePresent |
-                  DkImageFlags_HwCompression)
+                  DkImageFlags_Usage2DEngine | DkImageFlags_HwCompression)
         .setFormat(DkImageFormat_RGBA8_Unorm)
         .setDimensions(w, h)
         .initialize(layout);
