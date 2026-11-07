@@ -87,7 +87,6 @@ void Deko3DCommandProcessor::ShutdownContext() {
 
 void Deko3DCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
                                        uint32_t frontbuffer_height) {
-  (void)frontbuffer_ptr;
 #if REX_PLATFORM_SWITCH
   // The profiler's guest frame counter (the Vulkan path counts here too).
   RexSwitchPerfCount(0);
@@ -106,30 +105,24 @@ void Deko3DCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
   }
   const uint32_t display_width = frontbuffer_width ? frontbuffer_width : 1280;
   const uint32_t display_height = frontbuffer_height ? frontbuffer_height : 720;
+  // Never CPU-read the guest front buffer for presentation; the GPU resolve
+  // wrote the mirror, and the committed-page check still faults on this
+  // title's non-CPU-mapped swap allocation.
   const uint8_t* guest_pixels = nullptr;
-  // Direct CPU reads of the guest window are only safe for committed guest
-  // *physical* memory: a fault in another heap is unhandled by the runtime
-  // (observed with the front buffer before any GPU resolve has written it).
-  // Until the guest buffer exists, the presenter keeps showing the pattern.
-  if (graphics_system_ && graphics_system_->memory() && frontbuffer_ptr) {
-    rex::memory::Memory* memory = graphics_system_->memory();
-    rex::memory::BaseHeap* heap = memory->LookupHeap(frontbuffer_ptr);
-    if (heap && heap->heap_type() == rex::memory::HeapType::kGuestPhysical) {
-      rex::memory::HeapAllocationInfo info{};
-      if (heap->QueryRegionInfo(frontbuffer_ptr, &info) &&
-          (info.state & rex::memory::kMemoryAllocationCommit)) {
-        guest_pixels =
-            memory->TranslateVirtual<const uint8_t*>(frontbuffer_ptr);
-      }
-    }
-  }
   const uint32_t guest_pitch = display_width * 4;
   DkGpuAddr guest_gpu_pixels = 0;
   uint32_t guest_physical = 0;
   if (shared_memory_ && frontbuffer_ptr) {
-    guest_physical = memory_->GetPhysicalAddress(frontbuffer_ptr);
-    const uint64_t offset = guest_physical;
+    // Fable's swap pointer (and RB_COPY_DEST_BASE) is a guest *physical*
+    // address in the 512 MB GPU range; GetPhysicalAddress would treat it as a
+    // virtual address and fail. Use it directly when it fits, and only try a
+    // virtual-to-physical translation otherwise.
+    uint64_t offset = frontbuffer_ptr;
     const uint64_t byte_size = uint64_t(display_width) * display_height * 4;
+    if (offset + byte_size > SharedMemory::kBufferSize) {
+      guest_physical = memory_->GetPhysicalAddress(frontbuffer_ptr);
+      offset = guest_physical;
+    }
     if (offset + byte_size <= SharedMemory::kBufferSize) {
       guest_gpu_pixels = shared_memory_->gpu_address() + offset;
     }

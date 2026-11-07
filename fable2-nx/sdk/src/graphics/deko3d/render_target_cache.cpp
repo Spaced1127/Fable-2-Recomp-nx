@@ -30,7 +30,10 @@ DkImageFormat GetColorImageFormat(xenos::ColorRenderTargetFormat format) {
       return DkImageFormat_RGBA8_Unorm;
     case xenos::ColorRenderTargetFormat::k_2_10_10_10:
     case xenos::ColorRenderTargetFormat::k_2_10_10_10_AS_10_10_10_10:
-      return DkImageFormat_RGB10A2_Unorm;
+      // The guest's final menu target is 2_10_10_10, but the swap resolve is
+      // 8_8_8_8. deko3d canvas copies do not convert formats, so store this
+      // target as RGBA8 until the D3 resolve shader can do the conversion.
+      return DkImageFormat_RGBA8_Unorm;
     case xenos::ColorRenderTargetFormat::k_16_16:
       return DkImageFormat_RG16_Unorm;
     case xenos::ColorRenderTargetFormat::k_16_16_FLOAT:
@@ -226,6 +229,16 @@ bool Deko3DRenderTargetCache::RecordResolveCopy(
     uint32_t width, uint32_t height) {
   if (!EnsureRecording()) {
     return false;
+  }
+  if (target.format() != DkImageFormat_RGBA8_Unorm) {
+    static bool logged_unsupported_source = false;
+    if (!logged_unsupported_source) {
+      logged_unsupported_source = true;
+      REXGPU_WARN("deko3d: resolve source format {} is not RGBA8; dropping the "
+                  "copy until the conversion shader lands",
+                  uint32_t(target.format()));
+    }
+    return true;
   }
   static bool logged_first_copy = false;
   if (!logged_first_copy) {
