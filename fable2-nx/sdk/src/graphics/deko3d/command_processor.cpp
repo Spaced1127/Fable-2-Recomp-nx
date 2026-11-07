@@ -10,8 +10,13 @@
 
 #include <rex/graphics/deko3d/command_processor.h>
 #include <rex/graphics/deko3d/graphics_system.h>
+#include <rex/graphics/deko3d/render_target_cache.h>
+#include <rex/graphics/deko3d/shared_memory.h>
+#include <rex/graphics/deko3d/texture_cache.h>
+#include <rex/graphics/util/draw.h>
 #include <rex/logging.h>
 #include <rex/system/xmemory.h>
+#include <rex/ui/deko3d/deko3d_device.h>
 #include <rex/ui/deko3d/deko3d_presenter.h>
 #include <rex/ui/presenter.h>
 
@@ -23,16 +28,62 @@ extern "C" void RexSwitchPerfCount(unsigned id);
 namespace rex::graphics::deko3d {
 
 Deko3DCommandProcessor::Deko3DCommandProcessor(GraphicsSystem* graphics_system,
-                                               system::KernelState* kernel_state)
-    : CommandProcessor(graphics_system, kernel_state) {}
+                                               system::KernelState* kernel_state,
+                                               ui::deko3d::Deko3DDevice* device)
+    : CommandProcessor(graphics_system, kernel_state), device_(device) {}
 
 Deko3DCommandProcessor::~Deko3DCommandProcessor() = default;
 
 bool Deko3DCommandProcessor::SetupContext() {
+  if (!CommandProcessor::SetupContext()) {
+    return false;
+  }
+  if (!device_) {
+    REXGPU_ERROR("deko3d: no shared device for the command processor");
+    return false;
+  }
+  shared_memory_ = std::make_unique<Deko3DSharedMemory>(*device_, *memory_);
+  if (!shared_memory_->Initialize()) {
+    REXGPU_ERROR("deko3d: failed to initialize shared memory");
+    shared_memory_.reset();
+    return false;
+  }
+  render_target_cache_ = std::make_unique<Deko3DRenderTargetCache>(
+      *register_file_, *memory_, *device_, *shared_memory_);
+  if (!render_target_cache_->Initialize()) {
+    REXGPU_ERROR("deko3d: failed to initialize the render target cache");
+    render_target_cache_.reset();
+    shared_memory_.reset();
+    return false;
+  }
+  texture_cache_ = std::make_unique<Deko3DTextureCache>(*register_file_, *shared_memory_,
+                                                       *device_);
+  if (!texture_cache_->Initialize()) {
+    REXGPU_ERROR("deko3d: failed to initialize the texture cache");
+    texture_cache_.reset();
+    render_target_cache_->Shutdown();
+    render_target_cache_.reset();
+    shared_memory_.reset();
+    return false;
+  }
   return true;
 }
 
-void Deko3DCommandProcessor::ShutdownContext() {}
+void Deko3DCommandProcessor::ShutdownContext() {
+  if (texture_cache_) {
+    texture_cache_->Shutdown();
+    texture_cache_.reset();
+  }
+  if (render_target_cache_) {
+    render_target_cache_->Flush();
+    render_target_cache_->Shutdown();
+    render_target_cache_.reset();
+  }
+  if (device_) {
+    device_->WaitIdle();
+  }
+  shared_memory_.reset();
+}
 
 void Deko3DCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
                                        uint32_t frontbuffer_height) {
@@ -41,6 +92,11 @@ void Deko3DCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
   // The profiler's guest frame counter (the Vulkan path counts here too).
   RexSwitchPerfCount(0);
 #endif
+  // Submit this frame's clears and resolves before the presenter copies the
+  // front buffer to the swapchain.
+  if (render_target_cache_) {
+    render_target_cache_->Flush();
+  }
   if (!graphics_system_) {
     return;
   }
@@ -68,16 +124,30 @@ void Deko3DCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
     }
   }
   const uint32_t guest_pitch = display_width * 4;
+  DkGpuAddr guest_gpu_pixels = 0;
+  if (shared_memory_ && frontbuffer_ptr) {
+    const uint32_t physical = memory_->GetPhysicalAddress(frontbuffer_ptr);
+    const uint64_t offset = physical;
+    const uint64_t byte_size = uint64_t(display_width) * display_height * 4;
+    if (offset + byte_size <= SharedMemory::kBufferSize) {
+      guest_gpu_pixels = shared_memory_->gpu_address() + offset;
+    }
+  }
   const bool refreshed = presenter->RefreshGuestOutput(
       display_width, display_height, display_width, display_height,
-      [guest_pixels, display_width, display_height, guest_pitch](
-          ui::Presenter::GuestOutputRefreshContext& context) -> bool {
+      [guest_pixels, guest_gpu_pixels, display_width, display_height,
+       guest_pitch](ui::Presenter::GuestOutputRefreshContext& context) -> bool {
         auto& deko3d_context =
             static_cast<ui::deko3d::Deko3DGuestOutputRefreshContext&>(context);
-        deko3d_context.SetGuestOutput(guest_pixels, display_width, display_height,
-                                      guest_pitch);
+        if (guest_gpu_pixels) {
+          deko3d_context.SetGuestOutputGpu(guest_gpu_pixels, display_width, display_height,
+                                           guest_pitch);
+        } else {
+          deko3d_context.SetGuestOutput(guest_pixels, display_width, display_height,
+                                        guest_pitch);
+        }
         context.SetIs8bpc(true);
-        return guest_pixels != nullptr;
+        return guest_gpu_pixels != 0 || guest_pixels != nullptr;
       });
   (void)refreshed;
 }
@@ -103,7 +173,20 @@ bool Deko3DCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
 }
 
 bool Deko3DCommandProcessor::IssueCopy() {
-  return true;
+  if (!render_target_cache_) {
+    return true;
+  }
+  draw_util::ResolveInfo resolve_info;
+  if (!draw_util::GetResolveInfo(*register_file_, *memory_, 1, 1, false, false,
+                                 resolve_info)) {
+    static bool logged_invalid = false;
+    if (!logged_invalid) {
+      logged_invalid = true;
+      REXGPU_WARN("deko3d: invalid resolve info; dropping the copy/clear");
+    }
+    return true;
+  }
+  return render_target_cache_->Resolve(resolve_info);
 }
 
 }  // namespace rex::graphics::deko3d

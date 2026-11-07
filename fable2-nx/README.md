@@ -14,7 +14,7 @@ own disc.
 | Game boot → main menu (Vulkan/NVK renderer) | Working, but GPU-bound: ~1.6 fps at the menu |
 | Boot logos | Skippable via the existing patch (`fable2_config.toml [patches] skip_intro_videos`) |
 | Input / audio / saves | Working through the SDK's Horizon layer |
-| deko3d native backend | **Bring-up: D0/D1 done** — the game boots at its 30 fps cap with the deko3d presenter showing a test pattern; draw/render-target support is the next milestone |
+| deko3d native backend | **D2 first half** — shared 512 MB guest-memory mirror, host render targets, clears, direct `8_8_8_8` resolves into the mirror, GPU-only presentation; base-level texture upload. Draws/DKSH are D3. |
 | Shader chain for deko3d | Validated: 28/28 dumped shaders → SPIR-V → SPIRV-Cross → GLSL rewrite → uam → DKSH |
 | Known crash | A guest null dereference (`sub_822358A8` called with `r3 = 0`) occurs after a few minutes in the menu; not fixed yet |
 
@@ -143,6 +143,9 @@ gives the guest less RAM). Config files:
   presenter shows a test pattern and presents the guest front buffer once the GPU
   resolve path writes it. The backend plan and milestones are in
   `docs/DEKO3D_BACKEND.md`.
+- **deko3d D2 slice:** the shared-memory, host-render-target and GPU-present path
+  builds but has not been validated on the console yet. Until the D3 draw path
+  lands, the menu is expected to show the game's clears (usually black), not the UI.
 - **Vulkan path performance:** ~1.6 fps at the menu at 720p on hardware, dominated by
   render-target transfers/resolves under NVK.
 - The verifier expects the catalogue executable; other `default.xex` revisions need

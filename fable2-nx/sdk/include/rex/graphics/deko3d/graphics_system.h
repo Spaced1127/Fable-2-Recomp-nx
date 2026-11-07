@@ -10,6 +10,10 @@
 
 #include <rex/graphics/graphics_system.h>
 
+namespace rex::ui::deko3d {
+class Deko3DProvider;
+}
+
 namespace rex::graphics::deko3d {
 
 class Deko3DGraphicsSystem final : public GraphicsSystem {
@@ -22,6 +26,9 @@ class Deko3DGraphicsSystem final : public GraphicsSystem {
  protected:
   void CreateProvider(bool with_presentation) override;
   std::unique_ptr<CommandProcessor> CreateCommandProcessor() override;
+
+ private:
+  ui::deko3d::Deko3DProvider* deko3d_provider_ = nullptr;
 };
 
 }  // namespace rex::graphics::deko3d

@@ -11,12 +11,13 @@
 
 namespace rex::ui::deko3d {
 
-Deko3DProvider::Deko3DProvider() = default;
+Deko3DProvider::Deko3DProvider() : device_(Deko3DDevice::Create()) {}
 Deko3DProvider::~Deko3DProvider() = default;
 
 std::unique_ptr<Presenter> Deko3DProvider::CreatePresenter(
     Presenter::HostGpuLossCallback host_gpu_loss_callback) {
-  return std::make_unique<Deko3DPresenter>(std::move(host_gpu_loss_callback));
+  return std::make_unique<Deko3DPresenter>(device_.get(),
+                                           std::move(host_gpu_loss_callback));
 }
 
 std::unique_ptr<ImmediateDrawer> Deko3DProvider::CreateImmediateDrawer() {

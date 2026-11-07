@@ -20,6 +20,7 @@
 #include <deko3d.hpp>
 
 #include <rex/logging.h>
+#include <rex/ui/deko3d/deko3d_device.h>
 #include <rex/ui/deko3d/deko3d_presenter.h>
 #include <rex/ui/surface_switch.h>
 
@@ -34,8 +35,7 @@ constexpr uint32_t kCmdSize = 0x1000;
 
 struct Deko3DPresenter::Impl {
   std::mutex mutex;
-  dk::UniqueDevice device;
-  dk::UniqueQueue queue;
+  Deko3DDevice* device = nullptr;
   dk::UniqueSwapchain swapchain;
   dk::UniqueCmdBuf cmdbuf;
   dk::UniqueMemBlock fb_mem;
@@ -53,38 +53,38 @@ struct Deko3DPresenter::Impl {
   uint32_t guest_width = 0;
   uint32_t guest_height = 0;
   uint32_t guest_pitch = 0;
+  DkGpuAddr guest_gpu_pixels = 0;
+  uint32_t guest_gpu_pitch = 0;
 
   void ResetLocked() {
-    if (queue) {
-      queue.waitIdle();
+    if (device) {
+      std::lock_guard dev_lock(device->submit_mutex());
+      if (device->queue()) {
+        device->queue().waitIdle();
+      }
     }
     swapchain = nullptr;
     cmdbuf = nullptr;
     fb_mem = nullptr;
     cmd_mem = nullptr;
     upload_mem = nullptr;
-    queue = nullptr;
-    device = nullptr;
     connected = false;
     width = height = 0;
     guest_pixels = nullptr;
     guest_width = guest_height = guest_pitch = 0;
+    guest_gpu_pixels = 0;
+    guest_gpu_pitch = 0;
   }
 
   bool CreateLocked(NWindow* nw, uint32_t w, uint32_t h) {
-    device = dk::DeviceMaker{}.create();
-    if (!device) {
-      REXLOG_ERROR("[deko3d] device creation failed");
+    if (!device || !device->valid()) {
+      REXLOG_ERROR("[deko3d] no shared device for the presenter");
       return false;
     }
-    queue = dk::QueueMaker{device}.setFlags(DkQueueFlags_Graphics).create();
-    if (!queue) {
-      REXLOG_ERROR("[deko3d] queue creation failed");
-      return false;
-    }
+    const dk::Device dk_device = device->device();
 
     dk::ImageLayout layout;
-    dk::ImageLayoutMaker{device}
+    dk::ImageLayoutMaker{dk_device}
         .setFlags(DkImageFlags_UsageRender | DkImageFlags_UsagePresent |
                   DkImageFlags_HwCompression)
         .setFormat(DkImageFormat_RGBA8_Unorm)
@@ -93,7 +93,7 @@ struct Deko3DPresenter::Impl {
     const uint64_t fb_size = layout.getSize();
     const uint32_t fb_align = layout.getAlignment();
     const uint64_t fb_stride = (fb_size + fb_align - 1) & ~uint64_t(fb_align - 1);
-    fb_mem = dk::MemBlockMaker{device, uint32_t(fb_stride * kNumFramebuffers)}
+    fb_mem = dk::MemBlockMaker{dk_device, uint32_t(fb_stride * kNumFramebuffers)}
                  .setFlags(DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image)
                  .create();
     if (!fb_mem) {
@@ -106,14 +106,14 @@ struct Deko3DPresenter::Impl {
       fb_array[i] = &framebuffers[i];
     }
 
-    cmd_mem = dk::MemBlockMaker{device, kCmdSize * (kNumFramebuffers * 2 + 1)}
+    cmd_mem = dk::MemBlockMaker{dk_device, kCmdSize * (kNumFramebuffers * 2 + 2)}
                   .setFlags(DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached)
                   .create();
     if (!cmd_mem) {
       REXLOG_ERROR("[deko3d] command memory allocation failed");
       return false;
     }
-    cmdbuf = dk::CmdBufMaker{device}.create();
+    cmdbuf = dk::CmdBufMaker{dk_device}.create();
     if (!cmdbuf) {
       REXLOG_ERROR("[deko3d] command buffer creation failed");
       return false;
@@ -128,7 +128,7 @@ struct Deko3DPresenter::Impl {
     // Staging buffer for the guest front buffer and the per-slot copy list
     // that puts it into the swapchain image.
     const uint32_t upload_size = w * h * 4;
-    upload_mem = dk::MemBlockMaker{device, upload_size}
+    upload_mem = dk::MemBlockMaker{dk_device, upload_size}
                      .setFlags(DkMemBlockFlags_CpuCached | DkMemBlockFlags_GpuCached)
                      .create();
     if (!upload_mem) {
@@ -160,7 +160,7 @@ struct Deko3DPresenter::Impl {
     cmdbuf.clearColor(0, DkColorMask_RGBA, 0.9f, 0.9f, 0.9f, 1.0f);
     pattern_cmdlist = cmdbuf.finishList();
 
-    swapchain = dk::SwapchainMaker{device, nw, fb_array}.create();
+    swapchain = dk::SwapchainMaker{dk_device, nw, fb_array}.create();
     if (!swapchain) {
       REXLOG_ERROR("[deko3d] swapchain creation failed");
       return false;
@@ -174,8 +174,11 @@ struct Deko3DPresenter::Impl {
   }
 };
 
-Deko3DPresenter::Deko3DPresenter(HostGpuLossCallback host_gpu_loss_callback)
-    : Presenter(std::move(host_gpu_loss_callback)), impl_(std::make_unique<Impl>()) {}
+Deko3DPresenter::Deko3DPresenter(Deko3DDevice* device,
+                                 HostGpuLossCallback host_gpu_loss_callback)
+    : Presenter(std::move(host_gpu_loss_callback)), impl_(std::make_unique<Impl>()) {
+  impl_->device = device;
+}
 
 Deko3DPresenter::~Deko3DPresenter() {
   // The paint thread calls PaintAndPresentImpl, which belongs to this class.
@@ -239,7 +242,15 @@ bool Deko3DPresenter::RefreshGuestOutputImpl(
   Deko3DGuestOutputRefreshContext context(is_8bpc_out_ref);
   const bool refreshed = refresher(context);
   if (refreshed) {
-    impl_->guest_pixels = context.pixels();
+    if (context.gpu_pixels()) {
+      impl_->guest_pixels = nullptr;
+      impl_->guest_gpu_pixels = context.gpu_pixels();
+      impl_->guest_gpu_pitch = context.gpu_pitch();
+    } else {
+      impl_->guest_pixels = context.pixels();
+      impl_->guest_gpu_pixels = 0;
+      impl_->guest_gpu_pitch = 0;
+    }
     impl_->guest_width = context.width();
     impl_->guest_height = context.height();
     impl_->guest_pitch = context.pitch();
@@ -250,15 +261,37 @@ bool Deko3DPresenter::RefreshGuestOutputImpl(
 Presenter::PaintResult Deko3DPresenter::PaintAndPresentImpl(bool execute_ui_drawers) {
   (void)execute_ui_drawers;
   std::lock_guard lock(impl_->mutex);
-  if (!impl_->connected) {
+  if (!impl_->connected || !impl_->device) {
     return PaintResult::kNotPresented;
   }
-  const int slot = impl_->queue.acquireImage(impl_->swapchain);
-  impl_->queue.submitCommands(impl_->bind_cmdlists[slot]);
+  std::lock_guard dev_lock(impl_->device->submit_mutex());
+  dk::Queue queue = impl_->device->queue();
+  const int slot = queue.acquireImage(impl_->swapchain);
+  queue.submitCommands(impl_->bind_cmdlists[slot]);
 
+  const bool has_gpu_output = impl_->guest_gpu_pixels && impl_->guest_width &&
+                              impl_->guest_height && impl_->guest_gpu_pitch;
   const bool has_guest_output = impl_->guest_pixels && impl_->guest_width &&
                                 impl_->guest_height && impl_->guest_pitch;
-  if (has_guest_output) {
+  if (has_gpu_output) {
+    const uint32_t copy_width =
+        impl_->guest_width < impl_->width ? impl_->guest_width : impl_->width;
+    const uint32_t copy_height =
+        impl_->guest_height < impl_->height ? impl_->guest_height : impl_->height;
+    // Reuse is safe: the previous copy list has completed (Flush in IssueSwap
+    // waited for the queue) and this is the only writer of this command slot.
+    queue.waitIdle();
+    const uint32_t slot_offset = kNumFramebuffers * 2 * kCmdSize + kCmdSize;
+    impl_->cmdbuf.addMemory(impl_->cmd_mem, slot_offset, kCmdSize);
+    dk::ImageView dst_view{impl_->framebuffers[slot]};
+    DkCopyBuf source{};
+    source.addr = impl_->guest_gpu_pixels;
+    source.rowLength = impl_->guest_gpu_pitch / 4;
+    source.imageHeight = copy_height;
+    const DkImageRect rect{0, 0, 0, copy_width, copy_height, 1};
+    impl_->cmdbuf.copyBufferToImage(source, dst_view, rect);
+    queue.submitCommands(impl_->cmdbuf.finishList());
+  } else if (has_guest_output) {
     const uint32_t copy_width =
         impl_->guest_width < impl_->width ? impl_->guest_width : impl_->width;
     const uint32_t copy_height =
@@ -271,12 +304,12 @@ Presenter::PaintResult Deko3DPresenter::PaintAndPresentImpl(bool execute_ui_draw
                   row_bytes);
     }
     impl_->upload_mem.flushCpuCache(0, impl_->width * impl_->height * 4);
-    impl_->queue.submitCommands(impl_->guest_copy_cmdlists[slot]);
+    queue.submitCommands(impl_->guest_copy_cmdlists[slot]);
   } else {
-    impl_->queue.submitCommands(impl_->pattern_cmdlist);
+    queue.submitCommands(impl_->pattern_cmdlist);
   }
 
-  impl_->queue.presentImage(impl_->swapchain, slot);
+  queue.presentImage(impl_->swapchain, slot);
   return PaintResult::kPresented;
 }
 

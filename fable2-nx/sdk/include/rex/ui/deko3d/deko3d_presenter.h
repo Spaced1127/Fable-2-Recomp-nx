@@ -11,13 +11,17 @@
 #include <cstdint>
 #include <memory>
 
+#include <deko3d.hpp>
+
 #include <rex/ui/presenter.h>
 
 namespace rex::ui::deko3d {
 
+class Deko3DDevice;
+
 class Deko3DPresenter final : public Presenter {
  public:
-  explicit Deko3DPresenter(HostGpuLossCallback host_gpu_loss_callback);
+  Deko3DPresenter(Deko3DDevice* device, HostGpuLossCallback host_gpu_loss_callback);
   ~Deko3DPresenter() override;
 
   Surface::TypeFlags GetSupportedSurfaceTypes() const override;
@@ -53,18 +57,36 @@ class Deko3DGuestOutputRefreshContext final : public Presenter::GuestOutputRefre
     width_ = width;
     height_ = height;
     pitch_ = pitch;
+    gpu_pixels_ = 0;
+    gpu_pitch_ = 0;
+  }
+
+  // The resolved front buffer in the shared-memory GPU mirror. When nonzero,
+  // the presenter copies it directly instead of reading guest memory.
+  void SetGuestOutputGpu(DkGpuAddr pixels, uint32_t width, uint32_t height,
+                         uint32_t pitch) {
+    pixels_ = nullptr;
+    width_ = width;
+    height_ = height;
+    pitch_ = pitch;
+    gpu_pixels_ = pixels;
+    gpu_pitch_ = pitch;
   }
 
   const uint8_t* pixels() const { return pixels_; }
+  DkGpuAddr gpu_pixels() const { return gpu_pixels_; }
   uint32_t width() const { return width_; }
   uint32_t height() const { return height_; }
   uint32_t pitch() const { return pitch_; }
+  uint32_t gpu_pitch() const { return gpu_pitch_; }
 
  private:
   const uint8_t* pixels_ = nullptr;
+  DkGpuAddr gpu_pixels_ = 0;
   uint32_t width_ = 0;
   uint32_t height_ = 0;
   uint32_t pitch_ = 0;
+  uint32_t gpu_pitch_ = 0;
 };
 
 }  // namespace rex::ui::deko3d

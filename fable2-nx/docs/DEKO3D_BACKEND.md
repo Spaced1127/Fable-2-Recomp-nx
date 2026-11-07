@@ -95,6 +95,25 @@ the implementation map for the new Xenos graphics backend.
 
 ### D2 - textures and render targets (the hard half)
 
+**Status (2026-11-06): first half implemented and building.**
+- Shared `Deko3DDevice`/queue owned by the provider and used by both the
+  presenter and the Xenos command processor.
+- `Deko3DSharedMemory`: one zero-filled 512 MB deko3d mem block mirroring the
+  guest physical address space; CPU writes are uploaded with page-granularity
+  invalidation.
+- `Deko3DRenderTargetCache`: host render targets per EDRAM key, MSAA images
+  with a 1x resolve image, color/depth clears, and direct linear `8_8_8_8`
+  resolves into the shared-memory mirror.
+- The presenter copies resolved frames from the mirror to the swapchain with
+  `copyBufferToImage`; no CPU readback and no staging upload for GPU frames.
+- `Deko3DTextureCache`: deko3d image creation and base-level CPU
+  untiling/upload for RGBA8 and BCn formats. Descriptor binding, mips, arrays,
+  and 3D textures are D3 follow-ups.
+- Not implemented yet: EDRAM ownership transfers/aliasing between live targets
+  (the shader path will add them if the game needs them), tiled or non-`8_8_8_8`
+  resolve destinations, depth resolve copies, and all draw binding (D3).
+- This slice builds but has not yet been validated on the console.
+
 - `deko3d/TextureCache`: Xenos tiled formats -> deko3d images (swizzle,
   endianness, mips, signed/unsigned variants), invalidation on guest writes.
 - `deko3d/RenderTargetCache`: EDRAM emulation, host render target surfaces,

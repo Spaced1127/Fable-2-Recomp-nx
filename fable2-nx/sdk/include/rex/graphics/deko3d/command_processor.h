@@ -11,11 +11,20 @@
 
 #include <rex/graphics/command_processor.h>
 
+namespace rex::ui::deko3d {
+class Deko3DDevice;
+}
+
 namespace rex::graphics::deko3d {
+
+class Deko3DSharedMemory;
+class Deko3DRenderTargetCache;
+class Deko3DTextureCache;
 
 class Deko3DCommandProcessor final : public CommandProcessor {
  public:
-  Deko3DCommandProcessor(GraphicsSystem* graphics_system, system::KernelState* kernel_state);
+  Deko3DCommandProcessor(GraphicsSystem* graphics_system, system::KernelState* kernel_state,
+                         ui::deko3d::Deko3DDevice* device);
   ~Deko3DCommandProcessor() override;
 
   void IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
@@ -29,6 +38,12 @@ class Deko3DCommandProcessor final : public CommandProcessor {
   bool IssueDraw(xenos::PrimitiveType prim_type, uint32_t index_count,
                  IndexBufferInfo* index_buffer_info, bool major_mode_explicit) override;
   bool IssueCopy() override;
+
+ private:
+  ui::deko3d::Deko3DDevice* device_ = nullptr;
+  std::unique_ptr<Deko3DSharedMemory> shared_memory_;
+  std::unique_ptr<Deko3DRenderTargetCache> render_target_cache_;
+  std::unique_ptr<Deko3DTextureCache> texture_cache_;
 };
 
 }  // namespace rex::graphics::deko3d

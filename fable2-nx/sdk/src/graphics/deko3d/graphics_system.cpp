@@ -22,11 +22,14 @@ std::string Deko3DGraphicsSystem::name() const {
 
 void Deko3DGraphicsSystem::CreateProvider(bool with_presentation) {
   (void)with_presentation;
-  provider_ = std::make_unique<ui::deko3d::Deko3DProvider>();
+  auto provider = std::make_unique<ui::deko3d::Deko3DProvider>();
+  deko3d_provider_ = provider.get();
+  provider_ = std::move(provider);
 }
 
 std::unique_ptr<CommandProcessor> Deko3DGraphicsSystem::CreateCommandProcessor() {
-  return std::make_unique<Deko3DCommandProcessor>(this, kernel_state_);
+  return std::make_unique<Deko3DCommandProcessor>(
+      this, kernel_state_, deko3d_provider_ ? deko3d_provider_->device() : nullptr);
 }
 
 }  // namespace rex::graphics::deko3d

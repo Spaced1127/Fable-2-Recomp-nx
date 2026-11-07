@@ -98,6 +98,7 @@ endif()
 # deko3d UI backend (Nintendo Switch)
 if(REXGLUE_USE_DEKO3D)
     set(REXUI_DEKO3D_SOURCES
+        deko3d/deko3d_device.cpp
         deko3d/deko3d_presenter.cpp
         deko3d/deko3d_provider.cpp
     )
