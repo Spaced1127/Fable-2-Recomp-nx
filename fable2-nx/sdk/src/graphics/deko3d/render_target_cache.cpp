@@ -183,9 +183,20 @@ bool Deko3DRenderTargetCache::Flush() {
     device_.queue().signalFence(resolve_fence_, true);
     resolve_pending_ = true;
   }
+  static bool logged_resolve_submit = false;
+  if (!logged_resolve_submit) {
+    logged_resolve_submit = true;
+    REXGPU_INFO("deko3d: resolve list submitted; waiting for its fence");
+  }
   // The fence is signaled after the resolve commands and before the presenter
   // submits its copy, so this waits for the resolves only, never the present.
-  resolve_fence_.wait();
+  const DkResult wait_result = resolve_fence_.wait(2000000000);
+  if (wait_result == DkResult_Timeout) {
+    REXGPU_ERROR("deko3d: resolve fence timed out (queue error state {})",
+                 device_.queue().isInErrorState() ? 1 : 0);
+    resolve_pending_ = false;
+    return false;
+  }
   resolve_pending_ = false;
   for (const std::pair<uint32_t, uint32_t>& range : gpu_written_ranges_) {
     shared_memory_.RangeWrittenByGpu(range.first, range.second);
@@ -424,17 +435,47 @@ bool Deko3DRenderTargetCache::Target::Initialize() {
       return false;
     }
     resolve_image_.initialize(resolve_layout, resolve_memory_, 0);
+  } else {
+    // A 2D-engine staging image for every target. Copying directly from a
+    // render-target image to a guest buffer stalled the 2D engine; SVR2011's
+    // working path always copies through a texture.
+    dk::ImageLayout resolve_layout;
+    dk::ImageLayoutMaker{cache_.device_.device()}
+        .setFlags(DkImageFlags_Usage2DEngine)
+        .setFormat(format_)
+        .setDimensions(width_, height_)
+        .initialize(resolve_layout);
+    const uint64_t resolve_size = resolve_layout.getSize();
+    const uint32_t resolve_alignment = resolve_layout.getAlignment();
+    const uint64_t resolve_aligned =
+        (resolve_size + resolve_alignment - 1) & ~uint64_t(resolve_alignment - 1);
+    resolve_memory_ =
+        dk::MemBlockMaker{cache_.device_.device(), uint32_t(resolve_aligned)}
+            .setFlags(DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image)
+            .create();
+    if (!resolve_memory_) {
+      REXGPU_ERROR("deko3d: resolve staging image allocation failed ({}x{})", width_,
+                   height_);
+      return false;
+    }
+    resolve_image_.initialize(resolve_layout, resolve_memory_, 0);
   }
   return true;
 }
 
 dk::Image* Deko3DRenderTargetCache::Target::GetResolveSource(dk::CmdBuf& command_buffer) {
-  if (msaa_samples_ <= 1) {
-    return &image_;
+  if (msaa_samples_ > 1) {
+    command_buffer.barrier(DkBarrier_Full, DkInvalidateFlags_Image);
+    dk::ImageView source{image_};
+    dk::ImageView destination{resolve_image_};
+    command_buffer.resolveImage(source, destination);
+  } else {
+    command_buffer.barrier(DkBarrier_Full, DkInvalidateFlags_Image);
+    dk::ImageView source{image_};
+    dk::ImageView destination{resolve_image_};
+    const DkImageRect rect{0, 0, 0, width_, height_, 1};
+    command_buffer.copyImage(source, rect, destination, rect, 0);
   }
-  dk::ImageView source{image_};
-  dk::ImageView destination{resolve_image_};
-  command_buffer.resolveImage(source, destination);
   return &resolve_image_;
 }
 

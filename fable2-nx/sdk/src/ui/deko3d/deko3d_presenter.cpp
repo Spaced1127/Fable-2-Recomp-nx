@@ -291,7 +291,13 @@ Presenter::PaintResult Deko3DPresenter::PaintAndPresentImpl(bool execute_ui_draw
   // reused. The fence signs after the copy and before the present, so a paused
   // display (HOME, capture) does not hold this wait.
   if (impl_->copy_pending) {
-    impl_->copy_fence.wait();
+    const DkResult copy_wait = impl_->copy_fence.wait(2000000000);
+    if (copy_wait == DkResult_Timeout) {
+      REXLOG_ERROR("[deko3d] present copy fence timed out (queue error state {})",
+                   impl_->device->queue().isInErrorState() ? 1 : 0);
+      impl_->copy_pending = false;
+      return PaintResult::kNotPresented;
+    }
     impl_->copy_pending = false;
   }
   std::lock_guard dev_lock(impl_->device->submit_mutex());
