@@ -105,6 +105,17 @@ void Deko3DCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
   }
   const uint32_t display_width = frontbuffer_width ? frontbuffer_width : 1280;
   const uint32_t display_height = frontbuffer_height ? frontbuffer_height : 720;
+  dk::Image target_image{};
+  uint32_t target_width = 0;
+  uint32_t target_height = 0;
+  if (render_target_cache_ && frontbuffer_ptr) {
+    if (Deko3DRenderTargetCache::Target* target =
+            render_target_cache_->target_for_resolved_address(frontbuffer_ptr)) {
+      target_image = target->image();
+      target_width = target->width();
+      target_height = target->height();
+    }
+  }
   // Never CPU-read the guest front buffer for presentation; the GPU resolve
   // wrote the mirror, and the committed-page check still faults on this
   // title's non-CPU-mapped swap allocation.
@@ -139,11 +150,15 @@ void Deko3DCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
   }
   const bool refreshed = presenter->RefreshGuestOutput(
       display_width, display_height, display_width, display_height,
-      [guest_pixels, guest_gpu_pixels, display_width, display_height,
-       guest_pitch](ui::Presenter::GuestOutputRefreshContext& context) -> bool {
+      [guest_pixels, guest_gpu_pixels, target_image, target_width, target_height,
+       display_width, display_height, guest_pitch](
+          ui::Presenter::GuestOutputRefreshContext& context) -> bool {
         auto& deko3d_context =
             static_cast<ui::deko3d::Deko3DGuestOutputRefreshContext&>(context);
-        if (guest_gpu_pixels) {
+        if (target_width) {
+          deko3d_context.SetGuestOutputTarget(target_image, target_width, target_height,
+                                              display_width, display_height);
+        } else if (guest_gpu_pixels) {
           deko3d_context.SetGuestOutputGpu(guest_gpu_pixels, display_width, display_height,
                                            guest_pitch);
         } else {
@@ -151,7 +166,7 @@ void Deko3DCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
                                         guest_pitch);
         }
         context.SetIs8bpc(true);
-        return guest_gpu_pixels != 0 || guest_pixels != nullptr;
+        return target_width != 0 || guest_gpu_pixels != 0 || guest_pixels != nullptr;
       });
   (void)refreshed;
 }

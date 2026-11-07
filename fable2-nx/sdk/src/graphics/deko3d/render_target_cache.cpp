@@ -368,9 +368,18 @@ bool Deko3DRenderTargetCache::Resolve(const draw_util::ResolveInfo& resolve_info
     RenderTargetKey key;
     if (MakeResolveKey(edram_info, key)) {
       if (Target* target = GetOrCreateTarget(key)) {
-        if (RecordResolveCopy(*target, resolve_info, x, y, width, height)) {
-          last_color_resolve_address_ = resolve_info.copy_dest_base;
-          has_color_resolve_ = true;
+        // Present the host target directly for now. The guest-buffer resolve
+        // (copyImageToBuffer) stalls this deko3d queue; it will return as a
+        // compute/DKSH pass rather than a 2D-engine copy.
+        resolved_targets_[resolve_info.copy_dest_base] = target;
+        last_color_resolve_address_ = resolve_info.copy_dest_base;
+        has_color_resolve_ = true;
+        static bool logged_deferred = false;
+        if (!logged_deferred) {
+          logged_deferred = true;
+          REXGPU_INFO("deko3d: guest-buffer resolve deferred; presenting the host "
+                      "render target for 0x{:08X}",
+                      resolve_info.copy_dest_base);
         }
       }
     }

@@ -37,6 +37,7 @@ class Deko3DSharedMemory;
 
 class Deko3DRenderTargetCache final : public RenderTargetCache {
  public:
+  class Target;
   Deko3DRenderTargetCache(const RegisterFile& register_file, const memory::Memory& memory,
                           ui::deko3d::Deko3DDevice& device,
                           Deko3DSharedMemory& shared_memory);
@@ -60,12 +61,16 @@ class Deko3DRenderTargetCache final : public RenderTargetCache {
     return has_color_resolve_ && last_color_resolve_address_ == address;
   }
 
+  // The host color target that resolved to this guest address, for direct
+  // presentation while the guest-buffer resolve is deferred.
+  Target* target_for_resolved_address(uint32_t address) const {
+    auto it = resolved_targets_.find(address);
+    return it != resolved_targets_.end() ? it->second : nullptr;
+  }
+
   // Submits everything recorded since the previous flush and waits for the GPU
   // so the shared-memory mirror is coherent for the presenter.
   bool Flush();
-
-  // The image currently bound for a draw (D3 will use these).
-  class Target;
 
  protected:
   uint32_t GetMaxRenderTargetWidth() const override { return 8192; }
@@ -107,6 +112,7 @@ class Deko3DRenderTargetCache final : public RenderTargetCache {
       targets_;
 
   std::vector<std::pair<uint32_t, uint32_t>> gpu_written_ranges_;
+  std::unordered_map<uint32_t, Target*> resolved_targets_;
   uint32_t last_color_resolve_address_ = 0;
   bool has_color_resolve_ = false;
 };

@@ -59,6 +59,8 @@ class Deko3DGuestOutputRefreshContext final : public Presenter::GuestOutputRefre
     pitch_ = pitch;
     gpu_pixels_ = 0;
     gpu_pitch_ = 0;
+    target_image_ = dk::Image{};
+    has_target_ = false;
   }
 
   // The resolved front buffer in the shared-memory GPU mirror. When nonzero,
@@ -71,10 +73,31 @@ class Deko3DGuestOutputRefreshContext final : public Presenter::GuestOutputRefre
     pitch_ = pitch;
     gpu_pixels_ = pixels;
     gpu_pitch_ = pitch;
+    target_image_ = dk::Image{};
+    has_target_ = false;
+  }
+
+  // A host render target to present directly (D2: the guest-buffer resolve is
+  // deferred until the DKSH compute resolve exists).
+  void SetGuestOutputTarget(const dk::Image& image, uint32_t image_width, uint32_t image_height,
+                            uint32_t view_width, uint32_t view_height) {
+    pixels_ = nullptr;
+    gpu_pixels_ = 0;
+    width_ = view_width;
+    height_ = view_height;
+    pitch_ = view_width * 4;
+    target_image_ = image;
+    target_width_ = image_width;
+    target_height_ = image_height;
+    has_target_ = true;
   }
 
   const uint8_t* pixels() const { return pixels_; }
   DkGpuAddr gpu_pixels() const { return gpu_pixels_; }
+  dk::Image target_image() const { return target_image_; }
+  uint32_t target_width() const { return target_width_; }
+  uint32_t target_height() const { return target_height_; }
+  bool has_target() const { return has_target_; }
   uint32_t width() const { return width_; }
   uint32_t height() const { return height_; }
   uint32_t pitch() const { return pitch_; }
@@ -83,6 +106,10 @@ class Deko3DGuestOutputRefreshContext final : public Presenter::GuestOutputRefre
  private:
   const uint8_t* pixels_ = nullptr;
   DkGpuAddr gpu_pixels_ = 0;
+  dk::Image target_image_{};
+  uint32_t target_width_ = 0;
+  uint32_t target_height_ = 0;
+  bool has_target_ = false;
   uint32_t width_ = 0;
   uint32_t height_ = 0;
   uint32_t pitch_ = 0;

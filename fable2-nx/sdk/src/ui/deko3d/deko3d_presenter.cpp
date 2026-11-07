@@ -59,6 +59,10 @@ struct Deko3DPresenter::Impl {
   uint32_t guest_pitch = 0;
   DkGpuAddr guest_gpu_pixels = 0;
   uint32_t guest_gpu_pitch = 0;
+  dk::Image guest_target_image{};
+  uint32_t guest_target_width = 0;
+  uint32_t guest_target_height = 0;
+  bool has_guest_target = false;
 
   void ResetLocked() {
     if (device) {
@@ -81,6 +85,9 @@ struct Deko3DPresenter::Impl {
     guest_width = guest_height = guest_pitch = 0;
     guest_gpu_pixels = 0;
     guest_gpu_pitch = 0;
+    guest_target_image = dk::Image{};
+    guest_target_width = guest_target_height = 0;
+    has_guest_target = false;
   }
 
   bool CreateLocked(NWindow* nw, uint32_t w, uint32_t h) {
@@ -259,14 +266,26 @@ bool Deko3DPresenter::RefreshGuestOutputImpl(
   Deko3DGuestOutputRefreshContext context(is_8bpc_out_ref);
   const bool refreshed = refresher(context);
   if (refreshed) {
-    if (context.gpu_pixels()) {
+    if (context.has_target()) {
+      impl_->guest_pixels = nullptr;
+      impl_->guest_gpu_pixels = 0;
+      impl_->guest_gpu_pitch = 0;
+      impl_->guest_target_image = context.target_image();
+      impl_->guest_target_width = context.target_width();
+      impl_->guest_target_height = context.target_height();
+      impl_->has_guest_target = true;
+    } else if (context.gpu_pixels()) {
       impl_->guest_pixels = nullptr;
       impl_->guest_gpu_pixels = context.gpu_pixels();
       impl_->guest_gpu_pitch = context.gpu_pitch();
+      impl_->guest_target_image = dk::Image{};
+      impl_->has_guest_target = false;
     } else {
       impl_->guest_pixels = context.pixels();
       impl_->guest_gpu_pixels = 0;
       impl_->guest_gpu_pitch = 0;
+      impl_->guest_target_image = dk::Image{};
+      impl_->has_guest_target = false;
     }
     impl_->guest_width = context.width();
     impl_->guest_height = context.height();
@@ -305,11 +324,38 @@ Presenter::PaintResult Deko3DPresenter::PaintAndPresentImpl(bool execute_ui_draw
   const int slot = queue.acquireImage(impl_->swapchain);
   queue.submitCommands(impl_->bind_cmdlists[slot]);
 
+  const bool has_target = impl_->has_guest_target && impl_->guest_target_width &&
+                          impl_->guest_target_height && impl_->guest_width &&
+                          impl_->guest_height;
   const bool has_gpu_output = impl_->guest_gpu_pixels && impl_->guest_width &&
                               impl_->guest_height && impl_->guest_gpu_pitch;
   const bool has_guest_output = impl_->guest_pixels && impl_->guest_width &&
                                 impl_->guest_height && impl_->guest_pitch;
-  if (has_gpu_output) {
+  if (has_target) {
+    const uint32_t copy_width =
+        impl_->guest_width < impl_->width ? impl_->guest_width : impl_->width;
+    const uint32_t copy_height =
+        impl_->guest_height < impl_->height ? impl_->guest_height : impl_->height;
+    static bool logged_target_copy = false;
+    if (!logged_target_copy) {
+      logged_target_copy = true;
+      REXLOG_INFO("[deko3d] presenting render target 0x{:X}x{} as {}x{}",
+                  impl_->guest_target_width, impl_->guest_target_height, copy_width,
+                  copy_height);
+    }
+    impl_->gpu_cmdbuf.clear();
+    impl_->gpu_cmdbuf.addMemory(impl_->gpu_cmd_mem, slot * kCmdSize, kCmdSize);
+    impl_->gpu_cmdbuf.barrier(DkBarrier_Full, DkInvalidateFlags_Image);
+    dk::Image src_image = impl_->guest_target_image;
+    dk::ImageView src_view{src_image};
+    dk::ImageView dst_view{impl_->framebuffers[slot]};
+    const DkImageRect src_rect{0, 0, 0, copy_width, copy_height, 1};
+    const DkImageRect dst_rect{0, 0, 0, copy_width, copy_height, 1};
+    impl_->gpu_cmdbuf.copyImage(src_view, src_rect, dst_view, dst_rect, 0);
+    queue.submitCommands(impl_->gpu_cmdbuf.finishList());
+    queue.signalFence(impl_->copy_fence, true);
+    impl_->copy_pending = true;
+  } else if (has_gpu_output) {
     const uint32_t copy_width =
         impl_->guest_width < impl_->width ? impl_->guest_width : impl_->width;
     const uint32_t copy_height =
