@@ -96,6 +96,8 @@ void Deko3DCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
   if (render_target_cache_) {
     render_target_cache_->Flush();
   }
+  DkFence* frame_fence =
+      render_target_cache_ ? render_target_cache_->frame_fence() : nullptr;
   if (!graphics_system_) {
     return;
   }
@@ -151,10 +153,13 @@ void Deko3DCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
   const bool refreshed = presenter->RefreshGuestOutput(
       display_width, display_height, display_width, display_height,
       [guest_pixels, guest_gpu_pixels, target_image, target_width, target_height,
-       display_width, display_height, guest_pitch](
+       display_width, display_height, guest_pitch, frame_fence](
           ui::Presenter::GuestOutputRefreshContext& context) -> bool {
         auto& deko3d_context =
             static_cast<ui::deko3d::Deko3DGuestOutputRefreshContext&>(context);
+        if (frame_fence) {
+          deko3d_context.SetRenderFence(frame_fence);
+        }
         if (target_width) {
           deko3d_context.SetGuestOutputTarget(target_image, target_width, target_height,
                                               display_width, display_height);

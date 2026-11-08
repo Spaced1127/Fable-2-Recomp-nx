@@ -23,6 +23,12 @@ std::unique_ptr<Deko3DDevice> Deko3DDevice::Create() {
     REXLOG_ERROR("[deko3d] graphics queue creation failed");
     return nullptr;
   }
+  device->render_queue_ =
+      dk::QueueMaker{device->device_}.setFlags(DkQueueFlags_Graphics).create();
+  if (!device->render_queue_) {
+    REXLOG_ERROR("[deko3d] render queue creation failed");
+    return nullptr;
+  }
   return device;
 }
 
@@ -30,12 +36,23 @@ Deko3DDevice::~Deko3DDevice() {
   if (queue_) {
     queue_.waitIdle();
   }
+  if (render_queue_) {
+    render_queue_.waitIdle();
+  }
 }
 
 void Deko3DDevice::WaitIdle() {
-  std::lock_guard lock(submit_mutex_);
-  if (queue_) {
-    queue_.waitIdle();
+  {
+    std::lock_guard lock(submit_mutex_);
+    if (queue_) {
+      queue_.waitIdle();
+    }
+  }
+  {
+    std::lock_guard lock(render_mutex_);
+    if (render_queue_) {
+      render_queue_.waitIdle();
+    }
   }
 }
 

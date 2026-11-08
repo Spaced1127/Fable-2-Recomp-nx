@@ -28,16 +28,21 @@ class Deko3DDevice {
   Deko3DDevice(const Deko3DDevice&) = delete;
   Deko3DDevice& operator=(const Deko3DDevice&) = delete;
 
-  bool valid() const { return static_cast<bool>(device_) && static_cast<bool>(queue_); }
+  bool valid() const {
+    return static_cast<bool>(device_) && static_cast<bool>(queue_) &&
+           static_cast<bool>(render_queue_);
+  }
 
   dk::Device device() const { return device_; }
   dk::Queue queue() const { return queue_; }
+  dk::Queue render_queue() const { return render_queue_; }
 
-  // Held while anything submits or presents on the queue. Callers must not
-  // call WaitIdle while holding it.
+  // Held while anything submits or presents on the presentation queue.
   std::mutex& submit_mutex() { return submit_mutex_; }
+  // Held while the command processor submits on the render queue.
+  std::mutex& render_mutex() { return render_mutex_; }
 
-  // Waits for all submitted work. Takes the submit mutex internally.
+  // Waits for all submitted work on both queues.
   void WaitIdle();
 
  private:
@@ -45,7 +50,9 @@ class Deko3DDevice {
 
   dk::UniqueDevice device_;
   dk::UniqueQueue queue_;
+  dk::UniqueQueue render_queue_;
   std::mutex submit_mutex_;
+  std::mutex render_mutex_;
 };
 
 }  // namespace rex::ui::deko3d

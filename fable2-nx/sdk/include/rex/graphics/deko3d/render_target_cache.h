@@ -72,6 +72,10 @@ class Deko3DRenderTargetCache final : public RenderTargetCache {
   // so the shared-memory mirror is coherent for the presenter.
   bool Flush();
 
+  // Fence that the presentation queue must wait on before reading the target
+  // image. Null until a render submission has been made.
+  DkFence* frame_fence() { return resolve_pending_ ? &resolve_fence_ : nullptr; }
+
  protected:
   uint32_t GetMaxRenderTargetWidth() const override { return 8192; }
   uint32_t GetMaxRenderTargetHeight() const override { return 8192; }

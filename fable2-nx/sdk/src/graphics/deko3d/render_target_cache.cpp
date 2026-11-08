@@ -154,6 +154,10 @@ bool Deko3DRenderTargetCache::EnsureRecording() {
   if (resolve_pending_) {
     resolve_fence_.wait();
     resolve_pending_ = false;
+    for (const std::pair<uint32_t, uint32_t>& range : gpu_written_ranges_) {
+      shared_memory_.RangeWrittenByGpu(range.first, range.second);
+    }
+    gpu_written_ranges_.clear();
   }
   static bool logged_record_start = false;
   if (!logged_record_start) {
@@ -178,31 +182,18 @@ bool Deko3DRenderTargetCache::Flush() {
   }
   DkCmdList list = command_buffer_.finishList();
   {
-    std::lock_guard lock(device_.submit_mutex());
-    device_.queue().submitCommands(list);
-    device_.queue().signalFence(resolve_fence_, true);
+    std::lock_guard lock(device_.render_mutex());
+    device_.render_queue().submitCommands(list);
+    device_.render_queue().signalFence(resolve_fence_, true);
     resolve_pending_ = true;
   }
   static bool logged_resolve_submit = false;
   if (!logged_resolve_submit) {
     logged_resolve_submit = true;
-    REXGPU_INFO("deko3d: resolve list submitted; waiting for its fence");
+    REXGPU_INFO("deko3d: resolve list submitted on the render queue");
   }
-  // The fence is signaled after the resolve commands and before the presenter
-  // submits its copy, so this waits for the resolves only, never the present.
-  const DkResult wait_result = resolve_fence_.wait(2000000000);
-  if (wait_result == DkResult_Timeout) {
-    REXGPU_ERROR("deko3d: resolve fence timed out (queue error state {})",
-                 device_.queue().isInErrorState() ? 1 : 0);
-    resolve_pending_ = false;
-    return false;
-  }
-  resolve_pending_ = false;
-  for (const std::pair<uint32_t, uint32_t>& range : gpu_written_ranges_) {
-    shared_memory_.RangeWrittenByGpu(range.first, range.second);
-  }
-  gpu_written_ranges_.clear();
-  has_commands_ = false;
+  // Do not wait here: the presentation queue waits for this fence before it
+  // reads the target image, so render work never sits behind a present.
   return true;
 }
 

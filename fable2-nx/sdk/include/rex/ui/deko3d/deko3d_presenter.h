@@ -98,6 +98,8 @@ class Deko3DGuestOutputRefreshContext final : public Presenter::GuestOutputRefre
   uint32_t target_width() const { return target_width_; }
   uint32_t target_height() const { return target_height_; }
   bool has_target() const { return has_target_; }
+  void SetRenderFence(DkFence* fence) { render_fence_ = fence; }
+  DkFence* render_fence() const { return render_fence_; }
   uint32_t width() const { return width_; }
   uint32_t height() const { return height_; }
   uint32_t pitch() const { return pitch_; }
@@ -114,6 +116,7 @@ class Deko3DGuestOutputRefreshContext final : public Presenter::GuestOutputRefre
   uint32_t height_ = 0;
   uint32_t pitch_ = 0;
   uint32_t gpu_pitch_ = 0;
+  DkFence* render_fence_ = nullptr;
 };
 
 }  // namespace rex::ui::deko3d

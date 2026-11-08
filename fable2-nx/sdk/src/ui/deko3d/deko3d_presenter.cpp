@@ -63,6 +63,7 @@ struct Deko3DPresenter::Impl {
   uint32_t guest_target_width = 0;
   uint32_t guest_target_height = 0;
   bool has_guest_target = false;
+  DkFence* render_fence = nullptr;
 
   void ResetLocked() {
     if (device) {
@@ -88,6 +89,7 @@ struct Deko3DPresenter::Impl {
     guest_target_image = dk::Image{};
     guest_target_width = guest_target_height = 0;
     has_guest_target = false;
+    render_fence = nullptr;
   }
 
   bool CreateLocked(NWindow* nw, uint32_t w, uint32_t h) {
@@ -290,6 +292,7 @@ bool Deko3DPresenter::RefreshGuestOutputImpl(
     impl_->guest_width = context.width();
     impl_->guest_height = context.height();
     impl_->guest_pitch = context.pitch();
+    impl_->render_fence = context.render_fence();
   }
   return refreshed;
 }
@@ -323,6 +326,12 @@ Presenter::PaintResult Deko3DPresenter::PaintAndPresentImpl(bool execute_ui_draw
   dk::Queue queue = impl_->device->queue();
   const int slot = queue.acquireImage(impl_->swapchain);
   queue.submitCommands(impl_->bind_cmdlists[slot]);
+  if (impl_->render_fence) {
+    // The render queue wrote the target image; order the presentation copy
+    // after that fence instead of waiting on the render queue from the CPU.
+    queue.waitFence(*impl_->render_fence);
+    impl_->render_fence = nullptr;
+  }
 
   const bool has_target = impl_->has_guest_target && impl_->guest_target_width &&
                           impl_->guest_target_height && impl_->guest_width &&
