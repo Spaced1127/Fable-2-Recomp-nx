@@ -28,6 +28,11 @@ class Deko3DShaderPack {
   // the lifetime of the pack.
   const uint8_t* Find(const std::string& key, uint32_t& size_out) const;
 
+  // Finds any entry whose key starts with prefix (used to match a shader hash
+  // regardless of the translator modification bits). Returns nullptr if none.
+  const uint8_t* FindPrefix(const std::string& prefix, uint32_t& size_out,
+                            std::string* key_out = nullptr) const;
+
   size_t count() const { return entries_.size(); }
   bool loaded() const { return !entries_.empty(); }
 

@@ -130,6 +130,23 @@ def rewrite_scalar_block(text):
     return '\n'.join(lines)
 
 
+def rebind_shared_memory(text):
+    """Give XeSharedMemory its own storage-buffer binding.
+
+    SPIRV-Cross emits both XeSystemConstants and XeSharedMemory at binding 0
+    (they live in different Vulkan descriptor sets). deko3d has one storage
+    buffer namespace per stage, so the shared-memory mirror moves to binding 1.
+    """
+    out = []
+    for line in text.split('\n'):
+        if 'buffer XeSharedMemory' in line or re.search(
+                r'layout\([^)]*\)\s*(?:restrict\s+)?(?:readonly\s+)?buffer\s+XeSharedMemory\b',
+                line):
+            line = re.sub(r'binding\s*=\s*\d+', 'binding = 1', line, count=1)
+        out.append(line)
+    return '\n'.join(out)
+
+
 def convert(text, stage):
     text = re.sub(r'^#extension GL_EXT_scalar_block_layout\s*:\s*\w+\s*$', '',
                   text, flags=re.M)
@@ -139,6 +156,7 @@ def convert(text, stage):
         text = text.replace('gl_InstanceIndex', 'gl_InstanceID')
 
     text = rewrite_scalar_block(text)
+    text = rebind_shared_memory(text)
 
     # Drop uniform blocks whose instance name is never referenced.
     def drop_unused_block(m):

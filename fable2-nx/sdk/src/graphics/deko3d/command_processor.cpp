@@ -8,6 +8,12 @@
  *              See LICENSE file in the project root for full license text.
  */
 
+#include <cstdio>
+#include <set>
+#include <string>
+
+#include <xxhash.h>
+
 #include <rex/graphics/deko3d/command_processor.h>
 #include <rex/graphics/deko3d/graphics_system.h>
 #include <rex/graphics/deko3d/render_target_cache.h>
@@ -199,11 +205,46 @@ void Deko3DCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
 
 Shader* Deko3DCommandProcessor::LoadShader(xenos::ShaderType shader_type, uint32_t guest_address,
                                            const uint32_t* host_address, uint32_t dword_count) {
-  (void)shader_type;
   (void)guest_address;
-  (void)host_address;
-  (void)dword_count;
-  // Shader translation to DKSH comes with the draw path (D2).
+  if (!shader_pack_ || !host_address || !dword_count) {
+    return nullptr;
+  }
+  // Same hash the dump_shaders aid uses for its file names, so the pack keys
+  // (ps_<hash>_<modification>) match directly.
+  const uint64_t ucode_hash = XXH3_64bits(host_address, dword_count * sizeof(uint32_t));
+  char prefix[24];
+  std::snprintf(prefix, sizeof(prefix), "%s_%016llX",
+                shader_type == xenos::ShaderType::kPixel ? "ps" : "vs",
+                static_cast<unsigned long long>(ucode_hash));
+
+  uint32_t dksh_size = 0;
+  std::string pack_key;
+  const uint8_t* dksh = shader_pack_->FindPrefix(prefix, dksh_size, &pack_key);
+
+  // Called only from the command processor thread.
+  static std::set<std::string> logged_keys;
+  static uint32_t found_count = 0;
+  static uint32_t missing_count = 0;
+  if (dksh) {
+    ++found_count;
+  } else {
+    ++missing_count;
+  }
+  if (logged_keys.insert(prefix).second) {
+    if (dksh) {
+      REXGPU_INFO("deko3d: shader {} found in pack as {} ({} bytes)", prefix, pack_key,
+                  dksh_size);
+    } else {
+      REXGPU_WARN("deko3d: shader {} is NOT in the pack (draws using it are skipped)",
+                  prefix);
+    }
+    if ((found_count + missing_count) % 100 == 0) {
+      REXGPU_INFO("deko3d: shader lookups so far: {} in pack, {} missing", found_count,
+                  missing_count);
+    }
+  }
+  // Pipeline creation from the DKSH lands with the draw path; until then the
+  // draw is skipped and the lookup above tells us whether the pack is complete.
   return nullptr;
 }
 

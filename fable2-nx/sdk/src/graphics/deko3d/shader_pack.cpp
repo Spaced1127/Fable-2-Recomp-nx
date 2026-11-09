@@ -72,4 +72,19 @@ const uint8_t* Deko3DShaderPack::Find(const std::string& key, uint32_t& size_out
   return data_.data() + it->second.first;
 }
 
+const uint8_t* Deko3DShaderPack::FindPrefix(const std::string& prefix, uint32_t& size_out,
+                                            std::string* key_out) const {
+  for (const auto& entry : entries_) {
+    if (entry.first.compare(0, prefix.size(), prefix) == 0) {
+      size_out = entry.second.second;
+      if (key_out) {
+        *key_out = entry.first;
+      }
+      return data_.data() + entry.second.first;
+    }
+  }
+  size_out = 0;
+  return nullptr;
+}
+
 }  // namespace rex::graphics::deko3d
