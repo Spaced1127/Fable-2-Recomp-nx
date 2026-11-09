@@ -1176,11 +1176,19 @@ void Deko3DCommandProcessor::BindPipelineState(
                                                                                   : 0xFFFFFFFFu);
 }
 
-bool Deko3DCommandProcessor::DrawSkipped(const char* reason) {
+bool Deko3DCommandProcessor::DescribeSkipSoon(const char* reason) {
+  return skip_reasons_[reason] == 0;
+}
+
+bool Deko3DCommandProcessor::DrawSkipped(const char* reason, const char* detail) {
   ++frame_skips_;
   const uint32_t count = ++skip_reasons_[reason];
   if (count <= 3 || (count & 1023) == 0) {
-    REXGPU_WARN("deko3d: draw skipped ({}) - occurrence {}", reason, count);
+    if (detail && detail[0]) {
+      REXGPU_WARN("deko3d: draw skipped ({}) - occurrence {}: {}", reason, count, detail);
+    } else {
+      REXGPU_WARN("deko3d: draw skipped ({}) - occurrence {}", reason, count);
+    }
   }
   return true;
 }
@@ -1219,6 +1227,7 @@ bool Deko3DCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   // D3D12 backends dispatch the same way). Without this check the guest's
   // resolve draws are silently dropped.
   const xenos::EdramMode edram_mode = regs.Get<reg::RB_MODECONTROL>().edram_mode;
+  const reg::RB_SURFACE_INFO rb_surface_info_raw = regs.Get<reg::RB_SURFACE_INFO>();
   if (edram_mode == xenos::EdramMode::kCopy) {
     return IssueCopy();
   }
@@ -1315,7 +1324,13 @@ bool Deko3DCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   const DkPrimitive dk_primitive =
       GetDkPrimitive(primitive_processing_result.host_primitive_type, primitive_supported);
   if (!primitive_supported) {
-    return DrawSkipped("primitive_type");
+    char detail[96];
+    detail[0] = '\0';
+    if (DescribeSkipSoon("primitive_type")) {
+      std::snprintf(detail, sizeof(detail), "host primitive %u has no deko3d equivalent",
+                    uint32_t(primitive_processing_result.host_primitive_type));
+    }
+    return DrawSkipped("primitive_type", detail);
   }
 
   const uint32_t used_texture_mask =
@@ -1363,7 +1378,31 @@ bool Deko3DCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
 
   uint32_t color_target_count = 0;
   if (!BindRenderTargets(*command_buffer, normalized_color_mask, color_target_count)) {
-    return DrawSkipped("no_render_targets");
+    char detail[320];
+    detail[0] = '\0';
+    if (DescribeSkipSoon("no_render_targets")) {
+      const auto depth_control_raw = regs[reg::RB_DEPTHCONTROL::register_index];
+      const auto color_mask_raw = regs[reg::RB_COLOR_MASK::register_index];
+      const auto color_info = regs.Get<reg::RB_COLOR_INFO>();
+      const auto depth_info = regs.Get<reg::RB_DEPTH_INFO>();
+      std::snprintf(detail, sizeof(detail),
+                    "nothing bound: rasterization %d, edram_mode %d, path_select %d, "
+                    "pixel_shader %d (analyzed %d, %d dwords, writes targets 0x%X), "
+                    "RB_COLOR_MASK 0x%X -> normalized 0x%X, depth_control 0x%X "
+                    "(z %d, stencil %d), rt0 base %d format %d, depth base %d, "
+                    "pitch %d, msaa %d",
+                    int(is_rasterization_done), int(edram_mode),
+                    int(regs.Get<reg::VGT_OUTPUT_PATH_CNTL>().path_select),
+                    int(pixel_shader != nullptr),
+                    pixel_shader ? int(pixel_shader->is_ucode_analyzed()) : 0,
+                    pixel_shader ? int(pixel_shader->ucode_dword_count()) : 0,
+                    pixel_shader ? pixel_shader->writes_color_targets() : 0, color_mask_raw,
+                    normalized_color_mask, depth_control_raw,
+                    int(normalized_depth_control.z_enable), int(normalized_depth_control.stencil_enable),
+                    color_info.color_base, int(color_info.color_format), depth_info.depth_base,
+                    int(rb_surface_info_raw.surface_pitch), int(rb_surface_info_raw.msaa_samples));
+    }
+    return DrawSkipped("no_render_targets", detail);
   }
 
   // Shaders. dk::Shader derives from DkShader, but an array of the derived

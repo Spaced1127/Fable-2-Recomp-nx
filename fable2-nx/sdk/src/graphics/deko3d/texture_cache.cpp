@@ -293,12 +293,19 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
     return true;
   }
 
+  // The size must be a whole number of pages: deko3d allocates the block from
+  // the GPU memory pool at page granularity, and a copy that reads past the end
+  // of the mapped region does not report an error - it stalls the queue with the
+  // fence never signaling (measured: the first texture upload of the first real
+  // frame wedged the graphics queue permanently).
+  const uint32_t staging_size =
+      (total_bytes + DK_MEMBLOCK_ALIGNMENT - 1) & ~uint32_t(DK_MEMBLOCK_ALIGNMENT - 1);
   dk::UniqueMemBlock staging =
-      dk::MemBlockMaker{device_.device(), total_bytes}
+      dk::MemBlockMaker{device_.device(), staging_size}
           .setFlags(DkMemBlockFlags_CpuCached | DkMemBlockFlags_GpuCached)
           .create();
   if (!staging) {
-    REXGPU_ERROR("deko3d: texture staging allocation failed ({} bytes)", total_bytes);
+    REXGPU_ERROR("deko3d: texture staging allocation failed ({} bytes)", staging_size);
     return false;
   }
 
@@ -329,7 +336,12 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
     }
   }
 
-  if (!FlushCpuRange(staging, 0, total_bytes)) {
+  if (staging_size > total_bytes) {
+    // The copy reads whole pages from this block, so make the tail past the
+    // texture's own bytes defined instead of whatever the page held.
+    std::memset(destination + total_bytes, 0, staging_size - total_bytes);
+  }
+  if (!FlushCpuRange(staging, 0, staging_size)) {
     REXGPU_ERROR("deko3d: texture staging cache flush failed");
     return false;
   }
@@ -344,6 +356,10 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
   destination_view.setMipLevels(0, 1);
   const DkImageRect destination_rect{0, 0, 0, width, height, 1};
   upload_command_buffer_.copyBufferToImage(source_buffer, destination_view, destination_rect);
+  // Drop the GPU's cached image data afterwards: the draws that sample this
+  // texture are recorded into a different list, so queue order alone does not
+  // guarantee they see the new texels.
+  upload_command_buffer_.barrier(DkBarrier_Full, DkInvalidateFlags_Image);
   DkCmdList list = upload_command_buffer_.finishList();
   {
     std::lock_guard lock(device_.submit_mutex());

@@ -105,8 +105,13 @@ class Deko3DCommandProcessor final : public CommandProcessor {
                          const PrimitiveProcessor::ProcessingResult& primitive_processing_result);
 
   // Reports a skipped draw once per reason and counts it; always returns true
-  // so the guest ring keeps advancing.
-  bool DrawSkipped(const char* reason);
+  // so the guest ring keeps advancing. `detail`, when given, is appended to the
+  // first reports - enough to tell a genuine "the guest bound nothing" from a
+  // backend that failed to work out what was bound.
+  bool DrawSkipped(const char* reason, const char* detail = nullptr);
+  // True while a reason has not been reported yet, so the caller only pays for
+  // formatting a detail string when it will actually be logged.
+  bool DescribeSkipSoon(const char* reason);
   void ReportFrameDrawStats();
 
   uint64_t GetVertexShaderModification(

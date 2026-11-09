@@ -322,13 +322,33 @@ present in this SDK, so that particular pool corruption is not the cause here.
 
 ## Notes / traps
 
-- **Reserving deko3d memory on speculation can kill the app before it renders
-  anything.** The process pool here is already at 3281 of 3285 MiB at the menu,
-  so ~16 MiB taken by an over-sized queue scratch pool plus a second, unused
-  graphics queue stopped a later launch during early startup - before the GPU
-  subsystem's own log lines, with no crash record written. Measure the real
-  requirement (`tools/deko3d/inspect_pack.py`) instead, and put a flushed
-  `LogMemory()` step marker at each point of initialization.
+- **Every `DkMemBlockMaker` size must be a whole number of pages.** The texture
+  upload staging block was created with the exact untiled byte count, so the copy
+  read past the end of the mapped physical region. That reports no error and does
+  not fault the way a CPU read would: the 2D engine never finishes, the fence
+  never signals, and because the upload is waited on synchronously the Xenos
+  command processor thread parks. The console stays alive, audio stops, no frame
+  is ever presented again, and the last image stays on screen - which is exactly
+  how the first run with real draws ended. Round to `DK_MEMBLOCK_ALIGNMENT` and
+  zero the padding.
+- An upload into a texture needs `barrier(DkBarrier_Full, DkInvalidateFlags_Image)`
+  afterwards. Queue order proves the copy ran; it does not drop the GPU's cached
+  copy of the old texels.
+- **Bound every wait, and make the render thread able to give up.** The two ways
+  this backend has died at boot and mid-game were both "a fence that never
+  signals" on a thread that drives the guest ring. Unbounded waits turn that into
+  an unresponsive game with no crash record; `WaitFence()` plus `rendering_stopped_`
+  turn it into a named log line and a frozen last frame.
+- **Do not trust `mallinfo()` here.** Its fields are `int` and this port's free
+  heap is in the gigabytes, so `fordblks` overflows and prints a plausible
+  nonsense number - an early "the process is out of memory" diagnosis was based
+  on one. Use `fake_heap_end - sbrk(0)`; measured across renderer startup it goes
+  3178 -> 2281 MiB (512 MB of that the guest mirror), so there is plenty of room.
+- **Reserving deko3d memory on speculation was still wrong**, even though it was
+  not what killed those runs: a 64 KiB-per-warp scratch pool on two graphics
+  queues, one of which never executes, spent ~16 MiB for nothing. Measure the real
+  requirement (`tools/deko3d/inspect_pack.py` says the menu pack needs 0 bytes of
+  per-warp scratch) and put a flushed step marker at each point of initialization.
 - **A D3D12 PC build writes no shader dump.** `dump_shaders` lives in the Vulkan
   shader path; the PC reference build selects D3D12, so a run there produces an
   empty dump folder and looks like the aid silently failed. Dump from the Switch
