@@ -39,6 +39,7 @@ bool Deko3DGpuRing::Initialize() {
                 .create();
   if (!memory_) {
     REXGPU_ERROR("deko3d: {} ring allocation failed ({} bytes)", name_, block_size);
+    device_.LogMemory("ring allocation failed");
     return false;
   }
   cpu_address_ = static_cast<uint8_t*>(memory_.getCpuAddr());

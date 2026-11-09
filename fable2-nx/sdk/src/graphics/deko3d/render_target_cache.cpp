@@ -20,13 +20,13 @@ namespace rex::graphics::deko3d {
 
 namespace {
 
-// One frame's clears, draws and resolves all record into this. Sized for a few
-// thousand draws; a frame that grows past the mid-frame split threshold is
-// submitted in several lists rather than overflowing it.
-constexpr uint32_t kCommandMemorySize = 8 << 20;
-// Draws recorded before the list is split and submitted mid-frame. Conservative
-// relative to kCommandMemorySize: a draw with a full state change is on the
-// order of a hundred words, so this leaves an order of magnitude of headroom.
+// One frame's clears, draws and resolves all record into this. Kept small
+// because the process runs near its memory pool limit; kDrawsPerCommandList
+// bounds how much a single list can hold instead.
+constexpr uint32_t kCommandMemorySize = 2 << 20;
+// Draws recorded before the list is split and submitted mid-frame. A draw with
+// a full state change is on the order of a hundred 4-byte words, so this leaves
+// a few times of headroom inside kCommandMemorySize.
 constexpr uint32_t kDrawsPerCommandList = 3000;
 constexpr uint32_t kEdramTileWidth = xenos::kEdramTileWidthSamples;
 

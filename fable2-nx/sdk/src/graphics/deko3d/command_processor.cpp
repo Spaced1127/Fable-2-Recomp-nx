@@ -42,9 +42,12 @@ namespace {
 
 // Per-frame ring sizes. Both are recycled when the render target cache opens a
 // new command list, which is the one point where the previous list is known to
-// have completed.
-constexpr uint32_t kConstantRingSize = 16 << 20;
-constexpr uint32_t kDescriptorRingSize = 4 << 20;
+// have completed. Kept deliberately small: the process runs close to its
+// Horizon memory pool limit (the guest mirror alone is 512 MB), and a request
+// that does not fit skips the draw with a logged reason rather than costing
+// tens of megabytes that may not be there.
+constexpr uint32_t kConstantRingSize = 4 << 20;
+constexpr uint32_t kDescriptorRingSize = 1 << 20;
 
 // deko3d image and sampler descriptors are 32 bytes each.
 constexpr uint32_t kDescriptorSize = 32;
@@ -246,12 +249,18 @@ bool Deko3DCommandProcessor::SetupContext() {
     REXGPU_ERROR("deko3d: no shared device for the command processor");
     return false;
   }
+  // Every step below is logged and flushed. The Switch port runs close to its
+  // Horizon memory pool limit, so which allocation stopped the renderer has to
+  // survive in the log rather than sit in a buffer the process never reaches.
+  REXGPU_INFO("deko3d: command processor setting up");
+  device_->LogMemory("gpu setup: shared memory");
   shared_memory_ = std::make_unique<Deko3DSharedMemory>(*device_, *memory_);
   if (!shared_memory_->Initialize()) {
     REXGPU_ERROR("deko3d: failed to initialize shared memory");
     shared_memory_.reset();
     return false;
   }
+  device_->LogMemory("gpu setup: render target cache");
   render_target_cache_ = std::make_unique<Deko3DRenderTargetCache>(
       *register_file_, *memory_, *device_, *shared_memory_);
   if (!render_target_cache_->Initialize()) {
@@ -270,6 +279,7 @@ bool Deko3DCommandProcessor::SetupContext() {
     shared_memory_.reset();
     return false;
   }
+  device_->LogMemory("gpu setup: texture cache");
   shader_code_ = std::make_unique<Deko3DShaderCodeArena>(*device_);
   shader_code_->set_per_warp_scratch_size(ui::deko3d::Deko3DDevice::kPerWarpScratchSize);
 
@@ -280,6 +290,7 @@ bool Deko3DCommandProcessor::SetupContext() {
     return false;
   }
 
+  device_->LogMemory("gpu setup: primitive processor");
   primitive_processor_ = std::make_unique<Deko3DPrimitiveProcessor>(
       *register_file_, *memory_, *shared_memory_, *device_);
   if (!primitive_processor_->Initialize()) {
@@ -292,6 +303,7 @@ bool Deko3DCommandProcessor::SetupContext() {
     REXGPU_ERROR("deko3d: failed to create the placeholder texture");
     return false;
   }
+  device_->LogMemory("gpu setup: done");
 
   // The rings may only be recycled once the GPU has finished the previous
   // command list, which is exactly when the render target cache opens a new one.

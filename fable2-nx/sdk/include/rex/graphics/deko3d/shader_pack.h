@@ -56,12 +56,11 @@ class Deko3DShaderPack {
 
   bool Load(const std::filesystem::path& path);
 
-  // Returns the DKSH bytes for a key, or nullptr. The pointer stays valid for
+  // Finds an entry whose key starts with prefix and returns its DKSH bytes, or
+  // nullptr. A full key is its own prefix, so this serves both the exact lookup
+  // (prefix = "<ps|vs>_<hash>_<modification>") and the fallback to any variant
+  // of the same microcode (prefix = "<ps|vs>_<hash>_"). Pointers stay valid for
   // the lifetime of the pack.
-  const uint8_t* Find(const std::string& key, uint32_t& size_out) const;
-
-  // Finds any entry whose key starts with prefix (used to match a shader hash
-  // regardless of the translator modification bits). Returns nullptr if none.
   const uint8_t* FindPrefix(const std::string& prefix, uint32_t& size_out,
                             const Deko3DTextureBinding** bindings_out = nullptr,
                             uint32_t* bindings_count_out = nullptr,

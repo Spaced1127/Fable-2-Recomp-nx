@@ -16,10 +16,11 @@
 namespace rex::graphics::deko3d {
 
 namespace {
-// Room for the converted indices of a frame's draws. One draw can need up to
-// kMinRequiredConvertedIndexBufferSize on its own (triangle fan to list
-// conversion), so this is a few draws' worth of headroom on top.
-constexpr uint32_t kConvertedIndexRingSize = 8 << 20;
+// Room for the converted indices of a frame's draws. A single draw can need
+// more than this (a maximum-size triangle fan becomes ~12 MB of indices), and
+// then it is skipped with a reason instead of the ring being sized for the
+// worst case all the time.
+constexpr uint32_t kConvertedIndexRingSize = 4 << 20;
 
 uint32_t AlignUp(uint32_t value, uint32_t alignment) {
   return (value + alignment - 1) & ~(alignment - 1);
@@ -39,17 +40,23 @@ Deko3DPrimitiveProcessor::~Deko3DPrimitiveProcessor() {
 }
 
 bool Deko3DPrimitiveProcessor::Initialize() {
-  // deko3d takes full 32-bit indices (DkIdxFormat_UInt32), so no indirection is
-  // ever needed in the vertex shader.
+  // deko3d takes full 32-bit indices (DkIdxFormat_Uint32), so index indirection
+  // in the vertex shader is never needed for range.
   //
-  // Everything else is converted rather than passed to the host, matching the
-  // Vulkan backend's settings on a device without geometry shaders. That is
-  // what the DKSH pack was generated with: converting keeps the host vertex
-  // shader type at kVertex for ordinary draws, so the shader modification -
-  // part of the pack key - matches the dumped one. Point, rectangle list and
-  // quad list draws need their own translated vertex shaders and are reported
-  // as missing from the pack until a dump includes them.
-  if (!InitializeCommon(true, false, false, false, false, false)) {
+  // Triangle fans, line loops and quad lists are converted with the built-in
+  // index buffer rather than passed to the host, which keeps the host vertex
+  // shader type at kVertex - the only variant in the DKSH pack (the dump has no
+  // other host_vertex_shader_type, and the Vulkan backend converts fans for
+  // D3D12 parity, so this also matches the shaders that were captured).
+  //
+  // Point sprites and rectangle lists are left alone instead of expanded in the
+  // vertex shader, for two reasons: expanding them needs a translated vertex
+  // shader variant the pack does not contain, and it is what makes the common
+  // code allocate a two-triangle-strip built-in index buffer of about 1.5 MiB
+  // (rectangle lists) on top of ~2 MiB more (point sprites) - memory this port
+  // does not have to spare. deko3d draws points natively; rectangle lists have
+  // no deko3d primitive and are skipped with a reason.
+  if (!InitializeCommon(true, false, false, false, true, true)) {
     Shutdown();
     return false;
   }
@@ -97,6 +104,7 @@ bool Deko3DPrimitiveProcessor::InitializeBuiltinIndexBuffer(
   fill_callback(mapping);
   builtin_memory_.flushCpuCache(0, uint32_t(size_bytes));
   builtin_address_ = builtin_memory_.getGpuAddr();
+  REXGPU_INFO("deko3d: built-in index buffer {} KiB", uint32_t(size_bytes) >> 10);
   return true;
 }
 

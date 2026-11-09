@@ -156,7 +156,9 @@ gives the guest less RAM). Config files:
   shader variant whose translator modification was not dumped. Refresh by running
   the **Switch** build with `gpu_backend = "vulkan"` and `dump_shaders` set (the
   PC build uses D3D12 and dumps nothing), then `tools/deko3d/convert_shaders.py`
-  and `pack_shaders.py`.
+  and `pack_shaders.py`. `tools/deko3d/inspect_pack.py` reports what a pack asks
+  of the GPU - per-warp scratch, registers and size - so the queue is sized from
+  the pack instead of guessed.
 - **Vulkan path performance:** ~1.6 fps at the menu at 720p on hardware, dominated by
   render-target transfers/resolves under NVK.
 - The verifier expects the catalogue executable; other `default.xex` revisions need

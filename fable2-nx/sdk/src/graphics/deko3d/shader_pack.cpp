@@ -102,16 +102,6 @@ bool Deko3DShaderPack::Load(const std::filesystem::path& path) {
   return true;
 }
 
-const uint8_t* Deko3DShaderPack::Find(const std::string& key, uint32_t& size_out) const {
-  auto it = entries_.find(key);
-  if (it == entries_.end()) {
-    size_out = 0;
-    return nullptr;
-  }
-  size_out = it->second.data_size;
-  return data_.data() + it->second.data_offset;
-}
-
 const uint8_t* Deko3DShaderPack::FindPrefix(const std::string& prefix, uint32_t& size_out,
                                             const Deko3DTextureBinding** bindings_out,
                                             uint32_t* bindings_count_out,

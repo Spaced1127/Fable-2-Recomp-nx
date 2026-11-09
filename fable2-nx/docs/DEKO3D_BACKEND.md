@@ -225,6 +225,32 @@ What is implemented:
   submitted at the swap; after 3000 draws it is submitted and awaited so the
   8 MiB command memory cannot overflow.
 
+Memory, because this port runs at the edge of its Horizon pool (the profile
+measured **3281 of 3285 MiB** used at the menu):
+
+- `Deko3DDevice::Create()` and `Deko3DCommandProcessor::SetupContext()` log the
+  free heap and the unused process pool at every step and call `FlushLogging()`.
+  Info lines only reach the SD once a second, so a process that dies during
+  initialization otherwise loses exactly the lines that would explain it.
+- **The second graphics queue is gone.** D2 measured that a second graphics
+  queue never executes its command lists, and each queue reserves its own
+  per-warp scratch pool - so it was pure cost. Everything records into one list
+  on one queue.
+- **Per-warp scratch stays at deko3d's 2 KiB default.** Raising it to 64 KiB
+  looked prudent and cost about 8 MiB per queue. `tools/deko3d/inspect_pack.py`
+  reads the requirement out of the pack instead: **all 28 menu programs ask for
+  0 bytes.** If a future dump needs more, `Deko3DShaderCodeArena` refuses that
+  shader and logs the exact figure.
+- Rings are sized for the common case and a failed request skips the draw with a
+  logged reason (constants 4 MiB, descriptors 1 MiB, converted indices 4 MiB,
+  command list 2 MiB) instead of reserving for the worst case.
+- Point sprites and rectangle lists are **not** expanded in the vertex shader.
+  Beyond needing pack variants that do not exist, expansion is what makes the
+  common primitive processor allocate a ~1.5 MiB two-triangle-strip built-in
+  index buffer each. deko3d draws points natively; rectangle lists have no
+  deko3d primitive and are skipped with a reason. The built-in buffer that
+  remains (fan, loop and quad conversion) is logged at startup.
+
 Not implemented yet:
 
 - Memexport draws are skipped (counted and logged by reason).
@@ -269,6 +295,17 @@ present in this SDK, so that particular pool corruption is not the cause here.
 
 ## Notes / traps
 
+- **Reserving deko3d memory on speculation can kill the app before it renders
+  anything.** The process pool here is already at 3281 of 3285 MiB at the menu,
+  so ~16 MiB taken by an over-sized queue scratch pool plus a second, unused
+  graphics queue stopped a later launch during early startup - before the GPU
+  subsystem's own log lines, with no crash record written. Measure the real
+  requirement (`tools/deko3d/inspect_pack.py`) instead, and put a flushed
+  `LogMemory()` step marker at each point of initialization.
+- **A D3D12 PC build writes no shader dump.** `dump_shaders` lives in the Vulkan
+  shader path; the PC reference build selects D3D12, so a run there produces an
+  empty dump folder and looks like the aid silently failed. Dump from the Switch
+  build with `gpu_backend = "vulkan"`.
 - Keep the Vulkan backend buildable and selectable until D3; the game must
   remain comparable on the PC and Switch.
 - The guest memory window cannot use read-only protections on Horizon
