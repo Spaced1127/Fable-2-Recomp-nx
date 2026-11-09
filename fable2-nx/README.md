@@ -14,8 +14,8 @@ own disc.
 | Game boot → main menu (Vulkan/NVK renderer) | Working, but GPU-bound: ~1.6 fps at the menu |
 | Boot logos | Skippable via the existing patch (`fable2_config.toml [patches] skip_intro_videos`) |
 | Input / audio / saves | Working through the SDK's Horizon layer |
-| deko3d native backend | **D2 done on hardware: 29.6–29.9 fps** at the menu (vs 1.6 fps on Vulkan/NVK) — 512 MB guest mirror, host render targets, clears and native presentation. D3 (draws) is next, so the screen shows clears only. |
-| Shader chain for deko3d | Validated: 28/28 dumped shaders → SPIR-V → SPIRV-Cross → GLSL rewrite → uam → DKSH |
+| deko3d native backend | **D2 validated on hardware: 29.6–29.9 fps** at the menu (vs 1.6 fps on Vulkan/NVK). D3 (draws) is implemented and building — DKSH shaders, constants, render targets, full pipeline state, textures and indexed/non-indexed draws — but not yet verified on the console. |
+| Shader chain for deko3d | Validated: 28/28 dumped shaders → SPIR-V → SPIRV-Cross → GLSL rewrite → uam → DKSH, packed with per-shader texture binding tables |
 | Known crash | A guest null dereference (`sub_822358A8` called with `r3 = 0`) occurs after a few minutes in the menu; not fixed yet |
 
 The Vulkan/NVK path is the fully connected renderer today. The deko3d backend is the
@@ -142,10 +142,21 @@ gives the guest less RAM). Config files:
   It is independent of the renderer - it also occurs on the Vulkan path - and the
   crash report is written beside the NRO. Not fixed yet.
 - **deko3d D2 (validated on hardware):** shared memory, host render targets,
-  clears and native presentation run at the guest's 30 Hz cap. Until the D3 draw
-  path lands the screen shows only the game's clears (white, then black), while
-  audio and menu input work normally. Milestones and the hardware lessons are in
-  `docs/DEKO3D_BACKEND.md`.
+  clears and native presentation run at the guest's 30 Hz cap. Milestones and the
+  hardware lessons are in `docs/DEKO3D_BACKEND.md`.
+- **deko3d D3 (draws) is implemented but unverified:** the DKSH shaders, constant
+  upload, render-target binding, pipeline state, texture descriptors and both
+  indexed and non-indexed draws are in place. Until it is confirmed on the
+  console the screen may still show only the game's clears. Every skipped draw is
+  counted and logged by reason (`deko3d: frame N drew X, skipped Y (...)`), so a
+  black screen comes with the cause. Memexport draws and EDRAM ownership
+  transfers are not implemented.
+- **Shader pack coverage:** three menu shaders are missing
+  (`vs_AB1E86137A0240E8`, `vs_D5E12A97B3A84881`, `ps_93E7F7B5D05626AA`), and any
+  shader variant whose translator modification was not dumped. Refresh by running
+  the **Switch** build with `gpu_backend = "vulkan"` and `dump_shaders` set (the
+  PC build uses D3D12 and dumps nothing), then `tools/deko3d/convert_shaders.py`
+  and `pack_shaders.py`.
 - **Vulkan path performance:** ~1.6 fps at the menu at 720p on hardware, dominated by
   render-target transfers/resolves under NVK.
 - The verifier expects the catalogue executable; other `default.xex` revisions need

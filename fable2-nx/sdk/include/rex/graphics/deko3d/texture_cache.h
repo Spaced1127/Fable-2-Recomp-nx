@@ -38,6 +38,23 @@ class Deko3DTextureCache final : public TextureCache {
   bool Initialize();
   void Shutdown();
 
+  // What a draw binds for one texture fetch constant.
+  struct BoundTexture {
+    dk::Image* image = nullptr;
+    DkImageType image_type = DkImageType_2D;
+    xenos::DataDimension dimension = xenos::DataDimension::k2DOrStacked;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t depth_or_array_size = 1;
+  };
+
+  // The host image for a fetch constant, valid after RequestTextures included
+  // it. want_signed selects the signed version of a format that stores signed
+  // and unsigned data separately. Returns false when the fetch constant is
+  // invalid or the texture could not be created or loaded, in which case the
+  // draw binds a placeholder instead.
+  bool GetBoundTexture(uint32_t fetch_constant, bool want_signed, BoundTexture& out);
+
  protected:
   uint32_t GetHostFormatSwizzle(TextureKey key) const override {
     (void)key;

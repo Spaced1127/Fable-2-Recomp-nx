@@ -154,22 +154,85 @@ Verified facts that shape the implementation:
   `vertex_index_min`/`max`. The shaders declare 126 words because the
   tessellation constants (126/127) are unused.
 - Shader lookup key: `XXH3_64bits(ucode_dwords, dword_count * 4)`, formatted
-  `ps_%016X` / `vs_%016X`, matched by prefix so the translator modification bits
-  do not have to be reproduced.
+  `<ps|vs>_%016X_%016X` with the translator modification. The modification is
+  reproduced at runtime (`GetVertexShaderModification` /
+  `GetPixelShaderModification`), so the exact variant is picked; a miss falls
+  back to any variant of the same microcode and logs the missing key.
 - Pack coverage at the menu is nearly complete. Missing so far:
   `vs_AB1E86137A0240E8`, `vs_D5E12A97B3A84881`, `ps_93E7F7B5D05626AA` - refresh
-  by running the Vulkan build with `dump_shaders`, then `convert_shaders.py` and
-  `pack_shaders.py`.
+  by running the **Switch** build with `gpu_backend = "vulkan"` and
+  `dump_shaders` set (the PC build uses D3D12 and dumps nothing), then
+  `convert_shaders.py` and `pack_shaders.py`.
+- **The clip-space conventions already match.** The device is created with
+  deko3d's defaults, `DkDeviceFlags_OriginUpperLeft | DkDeviceFlags_DepthZeroToOne`,
+  which map clip-space y = +1 to the top row with depth 0...1 - Vulkan's, and
+  what Xenia's SPIR-V and `draw_util::GetHostViewportInfo(origin_bottom_left =
+  false)` produce. No viewport flip and no `ndc_scale` sign change are needed
+  (SVR2011 needs one only because its shaders come from DXBC via
+  `-fvk-invert-y`).
+- **The texture binding table has to travel with the pack.** uam drops the
+  SPIR-V names, and the Vulkan backend numbers texture and sampler descriptors
+  separately per stage while deko3d has one texture namespace per stage holding
+  combined image+sampler handles. `pack_shaders.py` therefore parses the
+  converter's `dk_xe_texture<N>_<dim>_<u|s>_xe_sampler<M>_<fff>` names out of
+  the generated GLSL and stores `(binding, texture fetch constant, sampler
+  fetch constant, dimension, signedness, mag/min/mip, aniso)` per shader
+  (`F2DKSH2`).
 
-Remaining work, in order:
-1. `Deko3DShader`: DKSH -> `dk::Shader` via a `DkMemBlockFlags_Code` block.
-2. Port `UpdateSystemConstantValues` (dropping the fragment-shader-interlock
-   paths) plus float/fetch constant upload into a per-draw ring buffer.
-3. Bind render targets, viewport/scissor and rasterizer/blend/depth state from
-   the register file; issue non-indexed draws first.
-4. Indexed draws: host-endian index buffers (the primitive processor's
-   converted-index path, or a simple swap into a reusable buffer).
-5. Texture descriptors: `DkResHandle` image+sampler sets from the texture cache.
+What is implemented:
+
+- `Deko3DShaderCodeArena`: 4 MiB `DkMemBlockFlags_Code` blocks, DKSH copied in
+  at 256-byte alignment, `per_warp_scratch_sz` from the DKSH program header
+  checked against the queue's (raised to 64 KiB - the 2 KiB default is far
+  below what Xenia's shaders ask for).
+- `Deko3DShader`: microcode holder plus a per-modification cache of loaded
+  `dk::Shader` variants and their binding tables.
+- `Deko3DPrimitiveProcessor`: configured `(full 32-bit indices, no triangle
+  fans, no line loops, no quad lists, native point sprites, no native rectangle
+  lists)`. Fans, loops and quads are converted with the built-in index buffer so
+  the host vertex shader type stays `kVertex` - the only one in the pack.
+  Rectangle lists need a vertex-shader-expansion variant and are reported
+  missing until a dump includes one.
+- `Deko3DGpuRing`: one CPU-cached block per kind (constants 16 MiB, descriptors
+  4 MiB, converted indices 8 MiB), bump-allocated, flushed with one
+  `flushCpuCache` before the draw, recycled when a new command list opens.
+- Constant upload: system constants (SSBO 0), tightly packed float constants
+  (UBO 1 vertex / UBO 2 pixel, from `ConstantRegisterMap::float_bitmap`),
+  bool+loop (UBO 3) and fetch constants (UBO 4). Consecutive draws that repeat
+  a buffer reuse its ring slice.
+- `UpdateSystemConstantValues` ported from the Vulkan backend with the
+  fragment-shader-interlock paths dropped (this backend is always host render
+  targets): flags, index endian/base/reset, user clip planes, ndc scale/offset,
+  point sizes, texture signs, alpha test and alpha-to-mask, colour exponent
+  bias.
+- State: rasterizer (cull, front face, polygon mode, depth clamp for
+  clip-disabled draws, polygon offset via `setDepthBias`), multisample (MSAA
+  mode from `RB_SURFACE_INFO`, alpha-to-coverage), per-target blend and write
+  masks, depth/stencil including the back-face ops and `setStencil`,
+  viewport/scissor from `GetHostViewportInfo`/`GetScissor`, primitive restart.
+  Alpha test is left to the pixel shader (`alphaCompareOp = Always`), matching
+  the translated shaders.
+- Textures: per draw, an image and a sampler descriptor set in the ring, bound
+  with `bindImageDescriptorSet`/`bindSamplerDescriptorSet`, and one
+  `dkMakeTextureHandle(i, i)` per binding via `bindTextures` (pixel shader
+  slots first, then vertex). Samplers come from the fetch constants combined
+  with the binding's filter overrides; LOD bias stays 0 because the shader
+  applies it. An invalid fetch constant binds a 1x1 opaque-white placeholder.
+- Draws: non-indexed, guest-DMA indexed (the guest's own big-endian buffer is
+  bound from the mirror and the shader swaps, exactly as on Vulkan), and
+  host-converted / built-in indexed.
+- All of a frame's clears, draws and resolves record into one command list
+  submitted at the swap; after 3000 draws it is submitted and awaited so the
+  8 MiB command memory cannot overflow.
+
+Not implemented yet:
+
+- Memexport draws are skipped (counted and logged by reason).
+- EDRAM tile-ownership transfers between live render targets are not performed;
+  a request is logged once.
+- Depth resolve copies, and the guest-buffer colour resolve (still presented
+  from the host target image directly).
+- Mip levels, 3D and cube texture uploads beyond the base level.
 
 ### Known guest crash (independent of rendering)
 
@@ -190,12 +253,13 @@ present in this SDK, so that particular pool corruption is not the cause here.
   linked into the NRO). Constant blocks: system constants as a read-only
   storage buffer, float/bool/fetch constants as std140 UBOs.
 
-### D3 - draws
+### D3b - correctness pass
 
-- Primitive processing (the common primitive processor already expands
-  points/quads); vertex fetch and index buffers from shared memory;
-  memexport if the game uses it.
 - Verify the menu and then gameplay against the PC build frame by frame.
+- Add the missing shader variants to the pack (re-dump from the Switch Vulkan
+  build) and re-check the skip-reason counts in the log.
+- Decide whether memexport draws and EDRAM ownership transfers are needed for
+  the world, and implement them if so.
 
 ### D4 - performance
 

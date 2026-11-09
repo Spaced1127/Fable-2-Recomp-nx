@@ -125,6 +125,7 @@ class Deko3DTextureCache::TextureImpl final : public Texture {
     height_ = height;
     depth_ = depth;
     format_ = format;
+    image_type_ = type;
 
     dk::ImageLayoutMaker maker{texture_cache_.device_.device()};
     maker.setFlags(DkImageFlags_Usage2DEngine)
@@ -153,8 +154,11 @@ class Deko3DTextureCache::TextureImpl final : public Texture {
 
   dk::Image& image() { return image_; }
   DkImageFormat format() const { return format_; }
+  DkImageType image_type() const { return image_type_; }
   uint32_t width() const { return width_; }
   uint32_t height() const { return height_; }
+  uint32_t depth() const { return depth_; }
+  bool valid() const { return static_cast<bool>(memory_); }
 
  private:
   Deko3DTextureCache& texture_cache_;
@@ -162,6 +166,7 @@ class Deko3DTextureCache::TextureImpl final : public Texture {
   dk::Image image_;
   dk::ImageLayout layout_;
   DkImageFormat format_ = DkImageFormat_RGBA8_Unorm;
+  DkImageType image_type_ = DkImageType_2D;
   uint32_t width_ = 0;
   uint32_t height_ = 0;
   uint32_t depth_ = 1;
@@ -343,6 +348,39 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
   }
   REXGPU_INFO("deko3d: uploaded texture {} ({}x{}, format {})", key.GetLogDimensionName(),
               width, height, uint32_t(key.format));
+  return true;
+}
+
+bool Deko3DTextureCache::GetBoundTexture(uint32_t fetch_constant, bool want_signed,
+                                         BoundTexture& out) {
+  out = BoundTexture();
+  if (fetch_constant >= xenos::kTextureFetchConstantCount) {
+    return false;
+  }
+  const TextureBinding* binding = GetValidTextureBinding(fetch_constant);
+  if (!binding) {
+    return false;
+  }
+  Texture* texture = want_signed && binding->texture_signed ? binding->texture_signed
+                                                            : binding->texture;
+  if (!texture) {
+    texture = binding->texture_signed ? binding->texture_signed : binding->texture;
+  }
+  if (!texture) {
+    return false;
+  }
+  // Keep the texture alive while this frame's command list references its image.
+  texture->MarkAsUsed();
+  TextureImpl& deko_texture = static_cast<TextureImpl&>(*texture);
+  if (!deko_texture.valid()) {
+    return false;
+  }
+  out.image = &deko_texture.image();
+  out.image_type = deko_texture.image_type();
+  out.width = deko_texture.width();
+  out.height = deko_texture.height();
+  out.depth_or_array_size = texture->key().depth_or_array_size_minus_1 + 1;
+  out.dimension = texture->key().dimension;
   return true;
 }
 

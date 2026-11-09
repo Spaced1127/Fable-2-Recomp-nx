@@ -17,6 +17,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <unordered_map>
 #include <utility>
@@ -76,6 +77,44 @@ class Deko3DRenderTargetCache final : public RenderTargetCache {
   // image. Null until a render submission has been made.
   DkFence* frame_fence() { return resolve_pending_ ? &resolve_fence_ : nullptr; }
 
+  // ---- Draw recording (D3) -------------------------------------------------
+  //
+  // All of a frame's GPU work - clears, draws and resolves - records into one
+  // command list submitted at the swap, because this deko3d only executes one
+  // graphics queue reliably and the present copy must be ordered after the
+  // draws. The command processor records its draws into the same list.
+
+  // Opens the frame's command list if needed and returns it, or nullptr on
+  // failure. Opening a new list waits for the previous frame's fence, so
+  // anything recorded since is complete; that is also the only safe point to
+  // recycle the per-frame rings, so recording_reset_callback_ runs there.
+  dk::CmdBuf* BeginRecording();
+
+  // Marks that commands were recorded, so Flush() submits the list even if no
+  // clear or resolve happened.
+  void NoteCommandsRecorded() { has_commands_ = true; }
+
+  // Called after every draw: the command memory is finite, so a long frame is
+  // split into several lists rather than overflowing it.
+  void CountDrawRecorded();
+
+  // Runs whenever a new command list is opened (after the previous one's fence
+  // has been waited on). The command processor uses it to reset its per-frame
+  // constant, index and descriptor rings.
+  void set_recording_reset_callback(std::function<void()> callback) {
+    recording_reset_callback_ = std::move(callback);
+  }
+
+  // The color and depth targets the last successful Update() bound, for
+  // attaching them to the draw's command list. Index 0 is depth, 1...4 are the
+  // color render targets; nullptr where nothing is bound.
+  Target* GetUsedRenderTarget(uint32_t index) const;
+
+  // Number of EDRAM tile-ownership transfer ranges the last Update() asked for.
+  // This backend does not copy between render targets, so a nonzero count means
+  // aliased surfaces may show stale contents.
+  uint32_t GetPendingTransferCount() const;
+
  protected:
   uint32_t GetMaxRenderTargetWidth() const override { return 8192; }
   uint32_t GetMaxRenderTargetHeight() const override { return 8192; }
@@ -95,6 +134,10 @@ class Deko3DRenderTargetCache final : public RenderTargetCache {
   }
 
   bool EnsureRecording();
+  // Finishes and submits the current list, waiting for it so the command
+  // memory and the per-frame rings can be reused. Used mid-frame when a list
+  // grows too large; Flush() is the non-blocking end-of-frame version.
+  void SubmitAndWaitForReuse();
   void RecordColorClear(Target& target, const draw_util::ResolveInfo& resolve_info,
                         uint32_t x, uint32_t y, uint32_t width, uint32_t height);
   void RecordDepthClear(Target& target, const draw_util::ResolveInfo& resolve_info,
@@ -108,9 +151,12 @@ class Deko3DRenderTargetCache final : public RenderTargetCache {
   dk::UniqueCmdBuf command_buffer_;
   dk::UniqueMemBlock command_memory_;
   dk::Fence resolve_fence_{};
+  dk::Fence reuse_fence_{};
   bool resolve_pending_ = false;
   bool recording_ = false;
   bool has_commands_ = false;
+  uint32_t draws_since_submit_ = 0;
+  std::function<void()> recording_reset_callback_;
 
   std::unordered_map<RenderTargetKey, std::unique_ptr<Target>, RenderTargetKey::Hasher>
       targets_;

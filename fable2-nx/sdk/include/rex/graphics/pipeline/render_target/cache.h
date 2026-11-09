@@ -492,6 +492,12 @@ class RenderTargetCache {
     assert_true(GetPath() == Path::kHostRenderTargets);
     return last_update_accumulated_render_targets_;
   }
+  // Render targets the draw call with the last successful update actually uses.
+  // 0 is depth, color starting from 1, nullptr if not bound.
+  RenderTarget* const* last_update_used_render_targets() const {
+    assert_true(GetPath() == Path::kHostRenderTargets);
+    return last_update_used_render_targets_;
+  }
   const std::vector<Transfer>* last_update_transfers() const {
     assert_true(GetPath() == Path::kHostRenderTargets);
     return last_update_transfers_;

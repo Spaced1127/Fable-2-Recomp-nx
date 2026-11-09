@@ -93,7 +93,10 @@ if(REXGLUE_USE_DEKO3D)
     list(APPEND REXGPU_XENOS_SOURCES
         deko3d/command_processor.cpp
         deko3d/graphics_system.cpp
+        deko3d/primitive_processor.cpp
         deko3d/render_target_cache.cpp
+        deko3d/ring_buffer.cpp
+        deko3d/shader.cpp
         deko3d/shader_pack.cpp
         deko3d/shared_memory.cpp
         deko3d/texture_cache.cpp)

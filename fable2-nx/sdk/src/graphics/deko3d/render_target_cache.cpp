@@ -20,7 +20,14 @@ namespace rex::graphics::deko3d {
 
 namespace {
 
-constexpr uint32_t kCommandMemorySize = 1 << 20;
+// One frame's clears, draws and resolves all record into this. Sized for a few
+// thousand draws; a frame that grows past the mid-frame split threshold is
+// submitted in several lists rather than overflowing it.
+constexpr uint32_t kCommandMemorySize = 8 << 20;
+// Draws recorded before the list is split and submitted mid-frame. Conservative
+// relative to kCommandMemorySize: a draw with a full state change is on the
+// order of a hundred words, so this leaves an order of magnitude of headroom.
+constexpr uint32_t kDrawsPerCommandList = 3000;
 constexpr uint32_t kEdramTileWidth = xenos::kEdramTileWidthSamples;
 
 DkImageFormat GetColorImageFormat(xenos::ColorRenderTargetFormat format) {
@@ -168,7 +175,83 @@ bool Deko3DRenderTargetCache::EnsureRecording() {
   command_buffer_.addMemory(command_memory_, 0, command_memory_.getSize());
   recording_ = true;
   has_commands_ = false;
+  draws_since_submit_ = 0;
+  // This is the one point where the GPU is known to be done with the previous
+  // list, so it is also where the command processor may recycle its per-frame
+  // constant, index and descriptor rings.
+  if (recording_reset_callback_) {
+    recording_reset_callback_();
+  }
+  // Drop whatever the GPU still holds cached of descriptors and shader code
+  // written since the previous list.
+  command_buffer_.barrier(DkBarrier_None,
+                          DkInvalidateFlags_Descriptors | DkInvalidateFlags_Shader);
+  has_commands_ = true;
   return true;
+}
+
+dk::CmdBuf* Deko3DRenderTargetCache::BeginRecording() {
+  return EnsureRecording() ? &command_buffer_ : nullptr;
+}
+
+void Deko3DRenderTargetCache::CountDrawRecorded() {
+  if (++draws_since_submit_ < kDrawsPerCommandList) {
+    return;
+  }
+  SubmitAndWaitForReuse();
+}
+
+void Deko3DRenderTargetCache::SubmitAndWaitForReuse() {
+  if (!recording_) {
+    return;
+  }
+  recording_ = false;
+  draws_since_submit_ = 0;
+  if (!has_commands_) {
+    return;
+  }
+  has_commands_ = false;
+  DkCmdList list = command_buffer_.finishList();
+  {
+    std::lock_guard lock(device_.submit_mutex());
+    device_.queue().submitCommands(list);
+    device_.queue().signalFence(reuse_fence_, true);
+  }
+  // Blocking on purpose: the command memory and the per-frame rings are about
+  // to be written again, so the GPU must have finished reading them. Splitting
+  // a frame is rare enough that the stall is preferable to a second, larger
+  // command buffer.
+  reuse_fence_.wait();
+  for (const std::pair<uint32_t, uint32_t>& range : gpu_written_ranges_) {
+    shared_memory_.RangeWrittenByGpu(range.first, range.second);
+  }
+  gpu_written_ranges_.clear();
+  static bool logged_split = false;
+  if (!logged_split) {
+    logged_split = true;
+    REXGPU_WARN("deko3d: frame split after {} draws; the command list grew too "
+                "large for one submission",
+                kDrawsPerCommandList);
+  }
+}
+
+Deko3DRenderTargetCache::Target* Deko3DRenderTargetCache::GetUsedRenderTarget(
+    uint32_t index) const {
+  if (index > xenos::kMaxColorRenderTargets) {
+    return nullptr;
+  }
+  return static_cast<Target*>(last_update_used_render_targets()[index]);
+}
+
+uint32_t Deko3DRenderTargetCache::GetPendingTransferCount() const {
+  // last_update_transfers() points at the first of 1 + kMaxColorRenderTargets
+  // vectors (index 0 is depth).
+  const std::vector<Transfer>* transfers = last_update_transfers();
+  uint32_t total = 0;
+  for (uint32_t i = 0; i < 1 + xenos::kMaxColorRenderTargets; ++i) {
+    total += uint32_t(transfers[i].size());
+  }
+  return total;
 }
 
 bool Deko3DRenderTargetCache::Flush() {
@@ -176,10 +259,11 @@ bool Deko3DRenderTargetCache::Flush() {
     return true;
   }
   recording_ = false;
+  draws_since_submit_ = 0;
   if (!has_commands_) {
-    has_commands_ = false;
     return true;
   }
+  has_commands_ = false;
   DkCmdList list = command_buffer_.finishList();
   {
     std::lock_guard lock(device_.submit_mutex());

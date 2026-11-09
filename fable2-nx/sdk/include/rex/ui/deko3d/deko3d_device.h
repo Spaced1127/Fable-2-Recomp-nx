@@ -22,6 +22,11 @@ namespace rex::ui::deko3d {
 
 class Deko3DDevice {
  public:
+  // Per-warp scratch memory every queue is created with. uam reports each
+  // shader's requirement in its DKSH program header; a shader needing more
+  // than this is rejected at load rather than failing silently at draw time.
+  static constexpr uint32_t kPerWarpScratchSize = 64 << 10;
+
   static std::unique_ptr<Deko3DDevice> Create();
   ~Deko3DDevice();
 

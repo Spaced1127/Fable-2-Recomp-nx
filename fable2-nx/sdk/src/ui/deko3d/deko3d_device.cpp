@@ -18,13 +18,22 @@ std::unique_ptr<Deko3DDevice> Deko3DDevice::Create() {
     REXLOG_ERROR("[deko3d] device creation failed");
     return nullptr;
   }
-  device->queue_ = dk::QueueMaker{device->device_}.setFlags(DkQueueFlags_Graphics).create();
+  // The default per-warp scratch (2 KB) is far below what Xenia's translated
+  // shaders need; a shader asking for more than the queue has fails at draw
+  // time with no diagnostic. The DKSH header's requirement is checked against
+  // this value when the shader is loaded.
+  device->queue_ = dk::QueueMaker{device->device_}
+                       .setFlags(DkQueueFlags_Graphics)
+                       .setPerWarpScratchMemorySize(kPerWarpScratchSize)
+                       .create();
   if (!device->queue_) {
     REXLOG_ERROR("[deko3d] graphics queue creation failed");
     return nullptr;
   }
-  device->render_queue_ =
-      dk::QueueMaker{device->device_}.setFlags(DkQueueFlags_Graphics).create();
+  device->render_queue_ = dk::QueueMaker{device->device_}
+                              .setFlags(DkQueueFlags_Graphics)
+                              .setPerWarpScratchMemorySize(kPerWarpScratchSize)
+                              .create();
   if (!device->render_queue_) {
     REXLOG_ERROR("[deko3d] render queue creation failed");
     return nullptr;
