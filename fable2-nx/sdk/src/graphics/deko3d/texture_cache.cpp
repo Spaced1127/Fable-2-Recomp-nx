@@ -251,6 +251,9 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
   if (!load_base) {
     return true;
   }
+  if (upload_stopped_) {
+    return false;
+  }
   TextureImpl& deko_texture = static_cast<TextureImpl&>(texture);
   const TextureKey& key = texture.key();
   const texture_util::TextureGuestLayout& guest_layout = texture.guest_layout();
@@ -345,7 +348,13 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
   {
     std::lock_guard lock(device_.submit_mutex());
     device_.queue().submitCommands(list);
-    device_.queue().waitIdle();
+    device_.queue().signalFence(upload_fence_, true);
+  }
+  if (!WaitFence(upload_fence_, "texture upload", upload_fence_stats_)) {
+    upload_stopped_ = true;
+    REXGPU_WARN("deko3d: texture upload stalled; further textures will not be "
+                "uploaded and will sample the placeholder instead");
+    return false;
   }
   REXGPU_INFO("deko3d: uploaded texture {} ({}x{}, format {})", key.GetLogDimensionName(),
               width, height, uint32_t(key.format));

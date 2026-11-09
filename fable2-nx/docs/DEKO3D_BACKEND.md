@@ -125,6 +125,16 @@ Hardware lessons recorded here because each cost a test cycle:
   queue** (queue error state 0, fence never signals). Presentation therefore
   copies the host target image directly; the guest-buffer resolve is deferred to
   a compute/DKSH pass.
+- **Never submit a command list that holds nothing but its opening barrier.** The
+  draw path opens a list at the top of every draw (so the per-frame rings can be
+  recycled before anything writes to them), and the first frame of the menu is 24
+  draws that all legitimately skip for want of rasterization. Recording therefore
+  contained only the descriptor/shader-cache invalidation barrier; submitting that
+  and signalling its fence left the fence unsignalled, and the next frame's
+  `EnsureRecording()` waited on it forever. The visible result was a game with no
+  audio, no further swaps and a live console - a hung command processor thread,
+  not a crash. Submit only lists with real commands, and bound every fence wait so
+  the next such stall is a named log line instead of a freeze.
 - A **second graphics queue does not execute** its command lists here: clears
   must be submitted on the presentation queue, ordered before the present copy.
 - Swapchain images need `DkImageFlags_Usage2DEngine` for 2D-engine copies, and
@@ -227,6 +237,16 @@ What is implemented:
 
 Memory, because this port runs at the edge of its Horizon pool (the profile
 measured **3281 of 3285 MiB** used at the menu):
+
+Budget as measured on hardware by the startup markers (`heap ... MiB untouched`,
+`fake_heap_end - sbrk(0)`): **3178 MiB** before the deko3d device, **3170** after
+the queue, **2857** before the 512 MB guest mirror, **2293** once it exists,
+**2281** with both draw rings, the converted-index ring, the 575 KiB built-in
+index buffer and the placeholder texture in. The counter fell about **890 MiB**
+across renderer startup - 512 MB of it the mirror, and other threads allocate
+concurrently, so treat it as a budget signal rather than an exact attribution -
+leaving ~2.3 GiB of heap untouched at steady state. The backend is not short of
+room, and a failure now reports its figure beside it.
 
 - `Deko3DDevice::Create()` and `Deko3DCommandProcessor::SetupContext()` report the
   remaining heap and the unused process pool at every step - as **warnings**,

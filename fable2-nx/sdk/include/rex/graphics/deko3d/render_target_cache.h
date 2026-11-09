@@ -25,6 +25,7 @@
 
 #include <deko3d.hpp>
 
+#include <rex/graphics/deko3d/fence_wait.h>
 #include <rex/graphics/pipeline/render_target/cache.h>
 #include <rex/graphics/util/draw.h>
 
@@ -152,8 +153,19 @@ class Deko3DRenderTargetCache final : public RenderTargetCache {
   dk::UniqueMemBlock command_memory_;
   dk::Fence resolve_fence_{};
   dk::Fence reuse_fence_{};
-  bool resolve_pending_ = false;
+  FenceWaitStats resolve_fence_stats_;
+  FenceWaitStats reuse_fence_stats_;
+  // Set once a fence fails to signal: the command memory and the per-frame rings
+  // cannot be recycled safely any more, so recording stops rather than the
+  // thread waiting forever on the next frame.
+  bool rendering_stopped_ = false;
   bool recording_ = false;
+  bool resolve_pending_ = false;
+  // True only when the list holds real commands. Opening a list emits a cache
+  // invalidation barrier, and a list that contains nothing but that barrier must
+  // not be submitted: it is the shape that stalls this queue elsewhere in this
+  // backend's history, and a frame whose draws were all skipped has nothing to
+  // submit anyway.
   bool has_commands_ = false;
   uint32_t draws_since_submit_ = 0;
   std::function<void()> recording_reset_callback_;

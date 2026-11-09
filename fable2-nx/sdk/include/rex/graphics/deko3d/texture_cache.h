@@ -16,6 +16,7 @@
 
 #include <deko3d.hpp>
 
+#include <rex/graphics/deko3d/fence_wait.h>
 #include <rex/graphics/pipeline/texture/cache.h>
 
 namespace rex::ui::deko3d {
@@ -78,6 +79,12 @@ class Deko3DTextureCache final : public TextureCache {
   ui::deko3d::Deko3DDevice& device_;
   dk::UniqueCmdBuf upload_command_buffer_;
   dk::UniqueMemBlock upload_command_memory_;
+  // Used instead of dkQueueWaitIdle for the upload: waiting for the whole queue
+  // also waits for anything already submitted on it, and an unbounded wait turns
+  // a stalled list into a hung command processor thread.
+  dk::Fence upload_fence_{};
+  FenceWaitStats upload_fence_stats_;
+  bool upload_stopped_ = false;
 };
 
 }  // namespace rex::graphics::deko3d
