@@ -322,15 +322,20 @@ present in this SDK, so that particular pool corruption is not the cause here.
 
 ## Notes / traps
 
-- **Every `DkMemBlockMaker` size must be a whole number of pages.** The texture
-  upload staging block was created with the exact untiled byte count, so the copy
-  read past the end of the mapped physical region. That reports no error and does
-  not fault the way a CPU read would: the 2D engine never finishes, the fence
-  never signals, and because the upload is waited on synchronously the Xenos
-  command processor thread parks. The console stays alive, audio stops, no frame
-  is ever presented again, and the last image stays on screen - which is exactly
-  how the first run with real draws ended. Round to `DK_MEMBLOCK_ALIGNMENT` and
-  zero the padding.
+- **Every `DkMemBlockMaker` size must be a whole number of pages.** Still true and
+  still worth doing, but it was **not** the cause of the upload stall: rounding the
+  staging block changed nothing and the queue wedged again the next run. Keep the
+  rule, don't accept it as the explanation.
+- **A 2D-engine copy can wedge the queue permanently, and it reports nothing.**
+  `copyBufferToImage` into a texture: the copy never completes, the fence never
+  signals, and because the upload is waited on synchronously the Xenos command
+  processor thread parks - a live console, no audio, no further frames ever, the
+  last image on screen. Happened on the first real upload both before and after
+  page-rounding. The presenter's RGBA8 swapchain uploads (16-byte pitched, not
+  block-compressed) have never done this, so the suspects are block-compressed
+  formats and row pitches that are not a multiple of 16 bytes; uploads of either
+  shape are now refused, with the parameters of the first eight logged, instead of
+  being allowed to take the renderer down.
 - An upload into a texture needs `barrier(DkBarrier_Full, DkInvalidateFlags_Image)`
   afterwards. Queue order proves the copy ran; it does not drop the GPU's cached
   copy of the old texels.

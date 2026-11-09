@@ -293,6 +293,38 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
     return true;
   }
 
+  const xenos::TextureFormat base_format = GetBaseFormat(key.format);
+  const bool block_compressed = base_format == xenos::TextureFormat::k_DXT1 ||
+                                base_format == xenos::TextureFormat::k_DXT2_3 ||
+                                base_format == xenos::TextureFormat::k_DXT4_5 ||
+                                base_format == xenos::TextureFormat::k_DXN;
+  static uint32_t logged_uploads = 0;
+  if (logged_uploads < 8) {
+    ++logged_uploads;
+    REXGPU_WARN(
+        "deko3d: texture upload {} of {}x{} format {} -> deko {}, block {}, row {} "
+        "bytes, total {} bytes, tiled {}, {} layers",
+        logged_uploads, width, height, uint32_t(key.format), uint32_t(deko_texture.format()),
+        int(block_compressed), row_bytes, total_bytes, int(key.tiled),
+        key.depth_or_array_size_minus_1 + 1);
+  }
+  // A 2D-engine copy of either of these shapes stalled the queue permanently on
+  // hardware - the copy never completed and its fence never signaled, which took
+  // the whole renderer down with it (the presenter's RGBA8 uploads into the
+  // swapchain, which are 16-byte pitched, have never done this). Refuse them and
+  // leave the image alone rather than risk the queue again, until the copy path
+  // for these formats is understood.
+  if (block_compressed || (row_bytes % 16) != 0) {
+    static bool logged_refusal = false;
+    if (!logged_refusal) {
+      logged_refusal = true;
+      REXGPU_WARN(
+          "deko3d: not uploading block-compressed or non-16-byte-pitched textures; "
+          "they keep whatever the image held until the 2D copy path for them is fixed");
+    }
+    return true;
+  }
+
   // The size must be a whole number of pages: deko3d allocates the block from
   // the GPU memory pool at page granularity, and a copy that reads past the end
   // of the mapped region does not report an error - it stalls the queue with the
