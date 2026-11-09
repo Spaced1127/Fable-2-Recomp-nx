@@ -9,6 +9,8 @@
 
 #pragma once
 
+#include <filesystem>
+
 #include <rex/graphics/command_processor.h>
 
 namespace rex::ui::deko3d {
@@ -19,6 +21,7 @@ namespace rex::graphics::deko3d {
 
 class Deko3DSharedMemory;
 class Deko3DRenderTargetCache;
+class Deko3DShaderPack;
 class Deko3DTextureCache;
 
 class Deko3DCommandProcessor final : public CommandProcessor {
@@ -29,6 +32,8 @@ class Deko3DCommandProcessor final : public CommandProcessor {
 
   void IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
                  uint32_t frontbuffer_height) override;
+  void InitializeShaderStorage(const std::filesystem::path& cache_root, uint32_t title_id,
+                               bool blocking) override;
 
  protected:
   bool SetupContext() override;
@@ -43,6 +48,7 @@ class Deko3DCommandProcessor final : public CommandProcessor {
   ui::deko3d::Deko3DDevice* device_ = nullptr;
   std::unique_ptr<Deko3DSharedMemory> shared_memory_;
   std::unique_ptr<Deko3DRenderTargetCache> render_target_cache_;
+  std::unique_ptr<Deko3DShaderPack> shader_pack_;
   std::unique_ptr<Deko3DTextureCache> texture_cache_;
 };
 

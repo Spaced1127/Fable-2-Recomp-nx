@@ -11,6 +11,7 @@
 #include <rex/graphics/deko3d/command_processor.h>
 #include <rex/graphics/deko3d/graphics_system.h>
 #include <rex/graphics/deko3d/render_target_cache.h>
+#include <rex/graphics/deko3d/shader_pack.h>
 #include <rex/graphics/deko3d/shared_memory.h>
 #include <rex/graphics/deko3d/texture_cache.h>
 #include <rex/graphics/util/draw.h>
@@ -83,6 +84,26 @@ void Deko3DCommandProcessor::ShutdownContext() {
     device_->WaitIdle();
   }
   shared_memory_.reset();
+}
+
+void Deko3DCommandProcessor::InitializeShaderStorage(
+    const std::filesystem::path& cache_root, uint32_t title_id, bool blocking) {
+  CommandProcessor::InitializeShaderStorage(cache_root, title_id, blocking);
+  shader_pack_ = std::make_unique<Deko3DShaderPack>();
+  const char* candidates[] = {
+      "Game_files/native_shaders/shaders.dk.pak",
+      "native_shaders/shaders.dk.pak",
+  };
+  for (const char* candidate : candidates) {
+    if (shader_pack_->Load(candidate)) {
+      return;
+    }
+  }
+  REXGPU_WARN(
+      "deko3d: no shader pack found; draws will be skipped until "
+      "Game_files/native_shaders/shaders.dk.pak exists (generate it with "
+      "tools/deko3d/convert_shaders.py and pack_shaders.py)");
+  shader_pack_.reset();
 }
 
 void Deko3DCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,

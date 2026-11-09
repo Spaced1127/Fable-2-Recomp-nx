@@ -182,9 +182,9 @@ bool Deko3DRenderTargetCache::Flush() {
   }
   DkCmdList list = command_buffer_.finishList();
   {
-    std::lock_guard lock(device_.render_mutex());
-    device_.render_queue().submitCommands(list);
-    device_.render_queue().signalFence(resolve_fence_, true);
+    std::lock_guard lock(device_.submit_mutex());
+    device_.queue().submitCommands(list);
+    device_.queue().signalFence(resolve_fence_, true);
     resolve_pending_ = true;
   }
   static bool logged_resolve_submit = false;

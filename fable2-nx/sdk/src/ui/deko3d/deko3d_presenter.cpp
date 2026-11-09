@@ -326,12 +326,10 @@ Presenter::PaintResult Deko3DPresenter::PaintAndPresentImpl(bool execute_ui_draw
   dk::Queue queue = impl_->device->queue();
   const int slot = queue.acquireImage(impl_->swapchain);
   queue.submitCommands(impl_->bind_cmdlists[slot]);
-  if (impl_->render_fence) {
-    // The render queue wrote the target image; order the presentation copy
-    // after that fence instead of waiting on the render queue from the CPU.
-    queue.waitFence(*impl_->render_fence);
-    impl_->render_fence = nullptr;
-  }
+  // The render-target clears are submitted on this same queue before the
+  // presenter runs, so queue order already guarantees they are done; a second
+  // graphics queue does not execute on this device.
+  impl_->render_fence = nullptr;
 
   const bool has_target = impl_->has_guest_target && impl_->guest_target_width &&
                           impl_->guest_target_height && impl_->guest_width &&
