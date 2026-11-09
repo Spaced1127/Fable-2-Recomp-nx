@@ -14,7 +14,7 @@ own disc.
 | Game boot → main menu (Vulkan/NVK renderer) | Working, but GPU-bound: ~1.6 fps at the menu |
 | Boot logos | Skippable via the existing patch (`fable2_config.toml [patches] skip_intro_videos`) |
 | Input / audio / saves | Working through the SDK's Horizon layer |
-| deko3d native backend | **D2 first half** — shared 512 MB guest-memory mirror, host render targets, clears, direct `8_8_8_8` resolves into the mirror, GPU-only presentation; base-level texture upload. Draws/DKSH are D3. |
+| deko3d native backend | **D2 done on hardware: 29.6–29.9 fps** at the menu (vs 1.6 fps on Vulkan/NVK) — 512 MB guest mirror, host render targets, clears and native presentation. D3 (draws) is next, so the screen shows clears only. |
 | Shader chain for deko3d | Validated: 28/28 dumped shaders → SPIR-V → SPIRV-Cross → GLSL rewrite → uam → DKSH |
 | Known crash | A guest null dereference (`sub_822358A8` called with `r3 = 0`) occurs after a few minutes in the menu; not fixed yet |
 
@@ -137,15 +137,15 @@ gives the guest less RAM). Config files:
 
 ## Known issues
 
-- **Menu crash:** a guest null dereference after a few minutes in the main menu
-  (`sub_822358A8` with `r3 = 0`); the crash report is written beside the NRO.
-- **deko3d backend:** draws, textures and render targets are not implemented yet; the
-  presenter shows a test pattern and presents the guest front buffer once the GPU
-  resolve path writes it. The backend plan and milestones are in
+- **Guest crash entering the world:** a guest null dereference
+  (`sub_822358A8` called with `r3 = 0`, faulting on `read of guest 0x00000024`).
+  It is independent of the renderer - it also occurs on the Vulkan path - and the
+  crash report is written beside the NRO. Not fixed yet.
+- **deko3d D2 (validated on hardware):** shared memory, host render targets,
+  clears and native presentation run at the guest's 30 Hz cap. Until the D3 draw
+  path lands the screen shows only the game's clears (white, then black), while
+  audio and menu input work normally. Milestones and the hardware lessons are in
   `docs/DEKO3D_BACKEND.md`.
-- **deko3d D2 slice:** the shared-memory, host-render-target and GPU-present path
-  builds but has not been validated on the console yet. Until the D3 draw path
-  lands, the menu is expected to show the game's clears (usually black), not the UI.
 - **Vulkan path performance:** ~1.6 fps at the menu at 720p on hardware, dominated by
   render-target transfers/resolves under NVK.
 - The verifier expects the catalogue executable; other `default.xex` revisions need

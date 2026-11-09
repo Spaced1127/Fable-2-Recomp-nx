@@ -95,24 +95,89 @@ the implementation map for the new Xenos graphics backend.
 
 ### D2 - textures and render targets (the hard half)
 
-**Status (2026-11-06): first half implemented and building.**
-- Shared `Deko3DDevice`/queue owned by the provider and used by both the
-  presenter and the Xenos command processor.
-- `Deko3DSharedMemory`: one zero-filled 512 MB deko3d mem block mirroring the
-  guest physical address space; CPU writes are uploaded with page-granularity
-  invalidation.
-- `Deko3DRenderTargetCache`: host render targets per EDRAM key, MSAA images
-  with a 1x resolve image, color/depth clears, and direct linear `8_8_8_8`
-  resolves into the shared-memory mirror.
-- The presenter copies resolved frames from the mirror to the swapchain with
-  `copyBufferToImage`; no CPU readback and no staging upload for GPU frames.
-- `Deko3DTextureCache`: deko3d image creation and base-level CPU
-  untiling/upload for RGBA8 and BCn formats. Descriptor binding, mips, arrays,
-  and 3D textures are D3 follow-ups.
-- Not implemented yet: EDRAM ownership transfers/aliasing between live targets
-  (the shader path will add them if the game needs them), tiled or non-`8_8_8_8`
-  resolve destinations, depth resolve copies, and all draw binding (D3).
-- This slice builds but has not yet been validated on the console.
+**Status: DONE on hardware (2026-11-08).** Measured with the game at the main
+menu and through character select:
+
+- **29.6-29.9 fps** (the guest's own 30 Hz cap) with GPU Commands at ~2.5% CPU,
+  versus 1.6 fps on the Vulkan/NVK path for the same scene.
+- Game logic, audio, saves and menu input all run; the host render target is
+  presented (white clear visible, then black because draws are not issued yet).
+- Shader pack loads: `deko3d: shader pack ... loaded (28 shaders)`.
+
+What is implemented:
+- Shared `Deko3DDevice`/queue owned by the provider, used by the presenter and
+  the Xenos command processor.
+- `Deko3DSharedMemory`: one 512 MB deko3d block mirroring guest physical memory
+  (CPU-uncached, so GPU writes are visible after a fence).
+- `Deko3DRenderTargetCache`: host color/depth images per EDRAM key, MSAA images
+  with 1x resolve images, color/depth clears, and presentation of the target
+  that resolved to the swap front-buffer address.
+- `Deko3DTextureCache`: deko3d image creation and base-level CPU untiling/upload
+  for RGBA8 and BCn textures.
+
+Hardware lessons recorded here because each cost a test cycle:
+- Fable submits resolves as **draw packets with `RB_MODECONTROL.edram_mode ==
+  kCopy`**; a backend that only implements `IssueCopy` never sees them.
+- `DkCopyBuf.rowLength` is **bytes per row** and `imageHeight` is **total
+  bytes** (`rowLength * rows`), not pixels/rows. Wrong units stall the 2D engine
+  with no queue error.
+- `copyImageToBuffer` from a render target into the guest mirror **stalls this
+  queue** (queue error state 0, fence never signals). Presentation therefore
+  copies the host target image directly; the guest-buffer resolve is deferred to
+  a compute/DKSH pass.
+- A **second graphics queue does not execute** its command lists here: clears
+  must be submitted on the presentation queue, ordered before the present copy.
+- Swapchain images need `DkImageFlags_Usage2DEngine` for 2D-engine copies, and
+  three images plus a copy fence (never `dkQueueWaitIdle`) per the SVR2011 guide.
+
+### D3 - draws
+
+Verified facts that shape the implementation:
+
+- **This deko3d has no pipeline-state-object API.** There is no
+  `dkGraphicsPipelineMaker`; plume's working backend binds everything
+  dynamically per draw: `bindShaders`, `bindRasterizerState`,
+  `bindMultisampleState`, `bindColorState`, `bindColorWriteState`,
+  `bindBlendStates`, `bindDepthStencilState`, `setViewports`, `setScissors`,
+  then `draw`/`drawIndexed`. So no PSO cache is needed.
+- **Vertex fetching happens in the shader.** The translated vertex shaders read
+  `XeSharedMemory` with `gl_VertexID` and the fetch constants, so there are no
+  host vertex buffers or vertex attribute layouts to build.
+- Binding model (after moving shared memory off binding 0):
+  - storage buffer 0 = `XeSystemConstants` (126 words)
+  - storage buffer 1 = `XeSharedMemory` (the 512 MB mirror)
+  - uniform buffer 2 = `XeFloatConstants`, uniform buffer 4 = `XeFetchConstants`
+  - `sampler2DArray` textures at bindings 0..N
+- `SpirvShaderTranslator::SystemConstants` maps 1:1 onto `dk_sys[]`. Verified
+  word indices: 2 `vertex_index_endian`, 3 `line_loop_closing_index`,
+  4 `vertex_base_index`, 72..75 `color_exp_bias`, 124/125
+  `vertex_index_min`/`max`. The shaders declare 126 words because the
+  tessellation constants (126/127) are unused.
+- Shader lookup key: `XXH3_64bits(ucode_dwords, dword_count * 4)`, formatted
+  `ps_%016X` / `vs_%016X`, matched by prefix so the translator modification bits
+  do not have to be reproduced.
+- Pack coverage at the menu is nearly complete. Missing so far:
+  `vs_AB1E86137A0240E8`, `vs_D5E12A97B3A84881`, `ps_93E7F7B5D05626AA` - refresh
+  by running the Vulkan build with `dump_shaders`, then `convert_shaders.py` and
+  `pack_shaders.py`.
+
+Remaining work, in order:
+1. `Deko3DShader`: DKSH -> `dk::Shader` via a `DkMemBlockFlags_Code` block.
+2. Port `UpdateSystemConstantValues` (dropping the fragment-shader-interlock
+   paths) plus float/fetch constant upload into a per-draw ring buffer.
+3. Bind render targets, viewport/scissor and rasterizer/blend/depth state from
+   the register file; issue non-indexed draws first.
+4. Indexed draws: host-endian index buffers (the primitive processor's
+   converted-index path, or a simple swap into a reusable buffer).
+5. Texture descriptors: `DkResHandle` image+sampler sets from the texture cache.
+
+### Known guest crash (independent of rendering)
+
+Entering the game world dies with `Unhandled guest access violation: read of
+guest 0x00000024` - the null-deref at `sub_822358A8` (r3 = 0) noted since the
+Vulkan bring-up. The PC reference tree's `sdk_mainmenu_crash_fix.patch`
+(`AllocFixed` must fail a re-reserve of an already-reserved range) is already
+present in this SDK, so that particular pool corruption is not the cause here.
 
 - `deko3d/TextureCache`: Xenos tiled formats -> deko3d images (swizzle,
   endianness, mips, signed/unsigned variants), invalidation on guest writes.
