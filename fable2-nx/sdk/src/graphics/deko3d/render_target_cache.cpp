@@ -80,6 +80,18 @@ DkMsMode GetMsMode(uint32_t samples) {
   }
 }
 
+// Binds the multisample state matching a target, for operations (clears) issued
+// against it outside of a draw, where no pipeline state has been bound yet.
+void BindTargetMultisample(dk::CmdBuf& command_buffer,
+                           const Deko3DRenderTargetCache::Target& target) {
+  DkMultisampleState multisample;
+  dkMultisampleStateDefaults(&multisample);
+  multisample.mode = GetMsMode(target.msaa_samples());
+  multisample.rasterizerMode = multisample.mode;
+  command_buffer.bindMultisampleState(multisample);
+  command_buffer.setSampleMask(0xFFFFFFFFu);
+}
+
 }  // namespace
 bool Deko3DRenderTargetCache::MakeResolveKey(
     const draw_util::ResolveEdramInfo& edram_info, RenderTargetKey& key_out) {
@@ -203,6 +215,25 @@ dk::CmdBuf* Deko3DRenderTargetCache::BeginRecording() {
   return EnsureRecording() ? &command_buffer_ : nullptr;
 }
 
+bool Deko3DRenderTargetCache::WaitForPendingList(const char* before_what) {
+  if (!resolve_pending_) {
+    return true;
+  }
+  if (!WaitFence(resolve_fence_, before_what, resolve_fence_stats_)) {
+    rendering_stopped_ = true;
+    REXGPU_WARN("deko3d: the render list submitted before %s never completed; render "
+                "recording is stopped",
+                before_what);
+    return false;
+  }
+  resolve_pending_ = false;
+  for (const std::pair<uint32_t, uint32_t>& range : gpu_written_ranges_) {
+    shared_memory_.RangeWrittenByGpu(range.first, range.second);
+  }
+  gpu_written_ranges_.clear();
+  return true;
+}
+
 void Deko3DRenderTargetCache::CountDrawRecorded() {
   if (++draws_since_submit_ < kDrawsPerCommandList) {
     return;
@@ -313,6 +344,10 @@ void Deko3DRenderTargetCache::RecordColorClear(
       float((clear >> 16) & 0xFF) / 255.0f,
       float((clear >> 24) & 0xFF) / 255.0f,
   };
+  // The multisample state has to match the target being cleared: a clear of a
+  // 2DMS image while the bound mode still says 1x is what a stalled 2D engine
+  // looked like in the first run that reached 2x render targets.
+  BindTargetMultisample(command_buffer_, target);
   dk::ImageView view{target.image()};
   command_buffer_.bindRenderTargets(&view);
   command_buffer_.setScissors(0, {{x, y, width, height}});
@@ -329,6 +364,7 @@ void Deko3DRenderTargetCache::RecordDepthClear(
   // The register is the guest depth clear value; for D24S8 the useful value is
   // the 24-bit fixed-point field. Clamp to the host's 0...1 range.
   float depth = float(resolve_info.rb_depth_clear & 0xFFFFFF) / 16777215.0f;
+  BindTargetMultisample(command_buffer_, target);
   dk::ImageView view{target.image()};
   command_buffer_.bindRenderTargets(nullptr, &view);
   command_buffer_.setScissors(0, {{x, y, width, height}});

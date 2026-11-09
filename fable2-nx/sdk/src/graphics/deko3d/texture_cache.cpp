@@ -308,22 +308,11 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
         int(block_compressed), row_bytes, total_bytes, int(key.tiled),
         key.depth_or_array_size_minus_1 + 1);
   }
-  // A 2D-engine copy of either of these shapes stalled the queue permanently on
-  // hardware - the copy never completed and its fence never signaled, which took
-  // the whole renderer down with it (the presenter's RGBA8 uploads into the
-  // swapchain, which are 16-byte pitched, have never done this). Refuse them and
-  // leave the image alone rather than risk the queue again, until the copy path
-  // for these formats is understood.
-  if (block_compressed || (row_bytes % 16) != 0) {
-    static bool logged_refusal = false;
-    if (!logged_refusal) {
-      logged_refusal = true;
-      REXGPU_WARN(
-          "deko3d: not uploading block-compressed or non-16-byte-pitched textures; "
-          "they keep whatever the image held until the 2D copy path for them is fixed");
-    }
-    return true;
-  }
+  // Not refused: the draw path now waits the previous list before an upload
+  // submits its own, so a stall names its own author - a timeout naming "a
+  // texture upload" is the copy, one naming the render list is the clear or draw
+  // that wedged the queue behind it. Refusing these shapes would have hidden that
+  // answer and left most of this title's DXT textures un-uploaded.
 
   // The size must be a whole number of pages: deko3d allocates the block from
   // the GPU memory pool at page granularity, and a copy that reads past the end

@@ -329,13 +329,17 @@ present in this SDK, so that particular pool corruption is not the cause here.
 - **A 2D-engine copy can wedge the queue permanently, and it reports nothing.**
   `copyBufferToImage` into a texture: the copy never completes, the fence never
   signals, and because the upload is waited on synchronously the Xenos command
-  processor thread parks - a live console, no audio, no further frames ever, the
-  last image on screen. Happened on the first real upload both before and after
-  page-rounding. The presenter's RGBA8 swapchain uploads (16-byte pitched, not
-  block-compressed) have never done this, so the suspects are block-compressed
-  formats and row pitches that are not a multiple of 16 bytes; uploads of either
-  shape are now refused, with the parameters of the first eight logged, instead of
-  being allowed to take the renderer down.
+  processor thread parks - a live console, no audio, no further frames ever. In
+  one run this escalated to a console that had to be power-cycled.
+- **...but a fence that times out only proves the queue is dead, not which
+  operation killed it.** The upload's fence cannot signal before the list
+  submitted at the previous swap has completed, so a bad clear gets blamed on
+  whichever upload waited behind it. The first run that reached **2x MSAA** render
+  targets stalled exactly there, and the clear path had never bound a multisample
+  state matching the target being cleared. Both addressed: clears now bind the
+  target's MS mode and sample mask, and the draw path waits the previous list
+  (bounded, named) before anything that submits its own, so a stall names the
+  operation that caused it.
 - An upload into a texture needs `barrier(DkBarrier_Full, DkInvalidateFlags_Image)`
   afterwards. Queue order proves the copy ran; it does not drop the GPU's cached
   copy of the old texels.

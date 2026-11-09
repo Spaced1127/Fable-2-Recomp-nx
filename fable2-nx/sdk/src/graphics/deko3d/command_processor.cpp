@@ -1336,6 +1336,14 @@ bool Deko3DCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   const uint32_t used_texture_mask =
       vertex_host_shader->used_texture_mask |
       (pixel_host_shader ? pixel_host_shader->used_texture_mask : 0);
+  // RequestTextures can upload a texture, which submits its own command list and
+  // waits on its own fence. That fence can only signal after this frame's
+  // predecessor has completed, so wait for the earlier one first: otherwise a
+  // stall caused by a clear or a draw is blamed on the upload that happened to
+  // be waiting behind it (which is exactly what the first 2x MSAA frame showed).
+  if (used_texture_mask && !render_target_cache_->WaitForPendingList("a texture upload")) {
+    return DrawSkipped("previous_list_stalled");
+  }
   texture_cache_->RequestTextures(used_texture_mask);
 
   const uint32_t normalized_color_mask =

@@ -99,6 +99,13 @@ class Deko3DRenderTargetCache final : public RenderTargetCache {
   // split into several lists rather than overflowing it.
   void CountDrawRecorded();
 
+  // Waits, bounded, for the list submitted at the last swap. Call this before
+  // work that submits and waits on its own list (a texture upload): the earlier
+  // fence can only be satisfied first, so without this a stall is blamed on
+  // whatever operation happened to be waiting rather than the one that caused
+  // it. False means the list never completed and recording has stopped.
+  bool WaitForPendingList(const char* before_what);
+
   // Runs whenever a new command list is opened (after the previous one's fence
   // has been waited on). The command processor uses it to reset its per-frame
   // constant, index and descriptor rings.
