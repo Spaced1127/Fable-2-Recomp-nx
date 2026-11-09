@@ -339,6 +339,7 @@ void Deko3DCommandProcessor::ShutdownContext() {
 }
 
 bool Deko3DCommandProcessor::InitializePlaceholderTexture() {
+  REXGPU_WARN("deko3d: placeholder texture: laying out 1x1 RGBA8");
   dk::ImageLayoutMaker maker{device_->device()};
   maker.setFlags(DkImageFlags_Usage2DEngine)
       .setType(DkImageType_2D)
@@ -348,10 +349,14 @@ bool Deko3DCommandProcessor::InitializePlaceholderTexture() {
   const uint64_t size = placeholder_layout_.getSize();
   const uint32_t alignment = placeholder_layout_.getAlignment();
   if (!size || !alignment) {
+    REXGPU_WARN("deko3d: placeholder texture: no layout size/alignment");
     return false;
   }
-  const uint64_t aligned = (size + alignment - 1) & ~uint64_t(alignment - 1);
-  placeholder_memory_ = dk::MemBlockMaker{device_->device(), uint32_t(aligned)}
+  // Round up to the image's own alignment, then to a page: deko3d memory blocks
+  // must be whole pages.
+  uint64_t block_size = (size + alignment - 1) & ~uint64_t(alignment - 1);
+  block_size = (block_size + DK_MEMBLOCK_ALIGNMENT - 1) & ~uint64_t(DK_MEMBLOCK_ALIGNMENT - 1);
+  placeholder_memory_ = dk::MemBlockMaker{device_->device(), uint32_t(block_size)}
                             .setFlags(DkMemBlockFlags_CpuCached | DkMemBlockFlags_GpuCached |
                                       DkMemBlockFlags_Image)
                             .create();
@@ -362,8 +367,9 @@ bool Deko3DCommandProcessor::InitializePlaceholderTexture() {
   // sampling garbage.
   uint32_t* pixels = static_cast<uint32_t*>(placeholder_memory_.getCpuAddr());
   pixels[0] = 0xFFFFFFFFu;
-  placeholder_memory_.flushCpuCache(0, sizeof(uint32_t));
+  FlushCpuRange(placeholder_memory_, 0, sizeof(uint32_t));
   placeholder_image_.initialize(placeholder_layout_, placeholder_memory_, 0);
+  REXGPU_WARN("deko3d: placeholder texture ready");
   return true;
 }
 
@@ -1486,7 +1492,9 @@ bool Deko3DCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   static bool logged_first_draw = false;
   if (!logged_first_draw) {
     logged_first_draw = true;
-    REXGPU_INFO(
+    // A warning so it is flushed: whether any draw was reached at all is the
+    // first question a black screen asks.
+    REXGPU_WARN(
         "deko3d: first draw: {} vs {} ps {}, primitive {}, {} vertices, {} color targets "
         "(mask 0x{:X}), textures vs {} ps {}",
         vertex_host_shader->pack_key,
@@ -1582,7 +1590,7 @@ void Deko3DCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
   static bool logged_swap = false;
   if (!logged_swap) {
     logged_swap = true;
-    REXGPU_INFO(
+    REXGPU_WARN(
         "deko3d: first swap: frontbuffer 0x{:08X} ({}x{}), physical 0x{:08X}, "
         "gpu 0x{:016X}, shared {}",
         frontbuffer_ptr, display_width, display_height, guest_physical,

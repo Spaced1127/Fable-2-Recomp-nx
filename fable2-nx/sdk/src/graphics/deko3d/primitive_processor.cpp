@@ -40,6 +40,7 @@ Deko3DPrimitiveProcessor::~Deko3DPrimitiveProcessor() {
 }
 
 bool Deko3DPrimitiveProcessor::Initialize() {
+  REXGPU_WARN("deko3d: primitive processor: converting fans, loops and quads");
   // deko3d takes full 32-bit indices (DkIdxFormat_Uint32), so index indirection
   // in the vertex shader is never needed for range.
   //
@@ -57,13 +58,18 @@ bool Deko3DPrimitiveProcessor::Initialize() {
   // does not have to spare. deko3d draws points natively; rectangle lists have
   // no deko3d primitive and are skipped with a reason.
   if (!InitializeCommon(true, false, false, false, true, true)) {
+    REXGPU_WARN("deko3d: primitive processor: InitializeCommon failed");
     Shutdown();
     return false;
   }
+  REXGPU_WARN("deko3d: primitive processor: converted index ring {} KiB",
+              kConvertedIndexRingSize >> 10);
   if (!index_ring_.Initialize()) {
+    REXGPU_WARN("deko3d: primitive processor: converted index ring allocation failed");
     Shutdown();
     return false;
   }
+  REXGPU_WARN("deko3d: primitive processor ready");
   return true;
 }
 
@@ -91,20 +97,33 @@ bool Deko3DPrimitiveProcessor::InitializeBuiltinIndexBuffer(
   if (!size_bytes || builtin_memory_) {
     return false;
   }
+  // A warning: these are the lines that have to survive if the process dies
+  // here, which is exactly what this step is being used to find out.
+  REXGPU_WARN("deko3d: built-in index buffer: allocating {} KiB", uint32_t(size_bytes) >> 10);
   const uint32_t block_size =
       AlignUp(uint32_t(size_bytes), uint32_t(DK_MEMBLOCK_ALIGNMENT));
   builtin_memory_ = dk::MemBlockMaker{device_.device(), block_size}
                         .setFlags(DkMemBlockFlags_CpuCached | DkMemBlockFlags_GpuCached)
                         .create();
   if (!builtin_memory_) {
-    REXGPU_ERROR("deko3d: built-in index buffer allocation failed ({} bytes)", size_bytes);
+    REXGPU_WARN("deko3d: built-in index buffer allocation failed ({} bytes)", size_bytes);
+    device_.LogMemory("built-in index buffer allocation failed");
     return false;
   }
   void* mapping = builtin_memory_.getCpuAddr();
+  if (!mapping) {
+    REXGPU_WARN("deko3d: built-in index buffer has no CPU address");
+    builtin_memory_ = nullptr;
+    return false;
+  }
+  REXGPU_WARN("deko3d: built-in index buffer: filling at {}", reinterpret_cast<uintptr_t>(mapping));
   fill_callback(mapping);
-  builtin_memory_.flushCpuCache(0, uint32_t(size_bytes));
+  REXGPU_WARN("deko3d: built-in index buffer: filled, flushing {} bytes", size_bytes);
+  if (!FlushCpuRange(builtin_memory_, 0, uint32_t(size_bytes))) {
+    REXGPU_WARN("deko3d: built-in index buffer cache flush refused");
+  }
   builtin_address_ = builtin_memory_.getGpuAddr();
-  REXGPU_INFO("deko3d: built-in index buffer {} KiB", uint32_t(size_bytes) >> 10);
+  REXGPU_WARN("deko3d: built-in index buffer ready at GPU 0x{:016X}", uint64_t(builtin_address_));
   return true;
 }
 

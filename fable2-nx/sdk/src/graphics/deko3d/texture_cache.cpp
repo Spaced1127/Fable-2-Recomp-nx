@@ -10,6 +10,7 @@
 #include <cstring>
 #include <mutex>
 
+#include <rex/graphics/deko3d/ring_buffer.h>
 #include <rex/graphics/deko3d/shared_memory.h>
 #include <rex/graphics/deko3d/texture_cache.h>
 #include <rex/graphics/pipeline/texture/conversion.h>
@@ -325,8 +326,8 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
     }
   }
 
-  if (staging.flushCpuCache(0, total_bytes) != DkResult_Success) {
-    REXGPU_ERROR("deko3d: texture staging flush failed");
+  if (!FlushCpuRange(staging, 0, total_bytes)) {
+    REXGPU_ERROR("deko3d: texture staging cache flush failed");
     return false;
   }
 

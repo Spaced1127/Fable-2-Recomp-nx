@@ -69,4 +69,9 @@ class Deko3DGpuRing {
   uint32_t flush_start_ = 0;
 };
 
+// Pushes a byte range of a block out of the CPU cache. deko3d's cache
+// maintenance works on whole cache lines, so the range is widened to them and
+// clamped to the block; false means deko3d refused it.
+bool FlushCpuRange(dk::MemBlock block, uint32_t offset, uint32_t size);
+
 }  // namespace rex::graphics::deko3d

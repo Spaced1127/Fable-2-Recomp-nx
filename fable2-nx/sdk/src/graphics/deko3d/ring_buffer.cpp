@@ -16,11 +16,36 @@ namespace rex::graphics::deko3d {
 
 namespace {
 
+// The Cortex-A57 data cache line. deko3d's cache maintenance works on lines.
+constexpr uint32_t kCacheLineSize = 64;
+
 uint32_t AlignUp(uint32_t value, uint32_t alignment) {
   return (value + alignment - 1) & ~(alignment - 1);
 }
 
 }  // namespace
+
+bool FlushCpuRange(dk::MemBlock block, uint32_t offset, uint32_t size) {
+  if (!block || !size) {
+    return true;
+  }
+  const uint32_t block_size = block.getSize();
+  if (offset >= block_size) {
+    return false;
+  }
+  // Widen to whole cache lines; the extra bytes belong to this block and
+  // cleaning them cannot lose anything the CPU did not already have.
+  const uint32_t aligned_start = offset & ~uint32_t(kCacheLineSize - 1);
+  uint32_t aligned_end = AlignUp(offset + size, kCacheLineSize);
+  if (aligned_end > block_size) {
+    aligned_end = AlignUp(block_size - (block_size % kCacheLineSize), kCacheLineSize);
+    if (aligned_end <= aligned_start) {
+      aligned_end = block_size;
+    }
+  }
+  const uint32_t aligned_size = aligned_end > aligned_start ? aligned_end - aligned_start : size;
+  return block.flushCpuCache(aligned_start, aligned_size) == DkResult_Success;
+}
 
 Deko3DGpuRing::Deko3DGpuRing(ui::deko3d::Deko3DDevice& device, uint32_t size_bytes,
                              const char* name)
@@ -77,7 +102,15 @@ void Deko3DGpuRing::Flush() {
   if (!memory_ || offset_ <= flush_start_) {
     return;
   }
-  memory_.flushCpuCache(flush_start_, offset_ - flush_start_);
+  const uint32_t written = offset_ - flush_start_;
+  if (!FlushCpuRange(memory_, flush_start_, written)) {
+    static bool logged_failure = false;
+    if (!logged_failure) {
+      logged_failure = true;
+      REXGPU_WARN("deko3d: {} ring cache flush refused (offset {}, {} bytes)", name_, flush_start_,
+                  written);
+    }
+  }
   flush_start_ = offset_;
 }
 

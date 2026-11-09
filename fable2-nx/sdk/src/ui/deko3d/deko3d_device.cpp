@@ -7,7 +7,6 @@
  */
 
 #include <cstdint>
-#include <malloc.h>
 #include <unistd.h>
 
 #include <switch.h>
@@ -21,16 +20,14 @@ namespace rex::ui::deko3d {
 
 namespace {
 
-// How much memory is left, reported the way plume's deko3d backend does it:
-// what malloc still holds free plus what sbrk can still take, and what the
-// process' Horizon memory pool has unused. The Switch port runs close to its
-// pool limit (the guest memory mirror alone is 512 MB), so every deko3d
-// allocation has to be attributable.
-void GetMemoryFigures(uint64_t& heap_free_out, uint64_t& process_free_out) {
-  struct mallinfo info = mallinfo();
+// How much memory is left. The process' Horizon memory pool is read from the
+// kernel; the app heap is measured as the part of the heap region sbrk has not
+// taken yet, because struct mallinfo reports its totals in `int` and this port's
+// heap runs in the gigabytes - a free-heap figure from mallinfo() silently
+// wraps past INT_MAX and reads as a plausible number that means nothing.
+void GetMemoryFigures(int64_t& heap_free_out, uint64_t& process_free_out) {
   char* break_address = static_cast<char*>(sbrk(0));
-  heap_free_out = uint64_t(info.fordblks) +
-                  (fake_heap_end > break_address ? uint64_t(fake_heap_end - break_address) : 0);
+  heap_free_out = fake_heap_end > break_address ? int64_t(fake_heap_end - break_address) : 0;
   uint64_t total = 0;
   uint64_t used = 0;
   svcGetInfo(&total, InfoType_TotalMemorySize, CUR_PROCESS_HANDLE, 0);
@@ -39,15 +36,13 @@ void GetMemoryFigures(uint64_t& heap_free_out, uint64_t& process_free_out) {
 }
 
 void LogMemoryFigures(const char* where) {
-  uint64_t heap_free = 0;
+  int64_t heap_free = 0;
   uint64_t process_free = 0;
   GetMemoryFigures(heap_free, process_free);
-  REXLOG_INFO("[deko3d] {}: heap {} MiB free, process {} MiB unused of its pool", where,
+  // A warning, not an info line: warnings are flushed as they are written, and
+  // the point of these figures is to still be on the card if the process dies.
+  REXLOG_WARN("[deko3d] {}: heap {} MiB untouched, process {} MiB unused of its pool", where,
               heap_free >> 20, process_free >> 20);
-  // The Switch log lives on the SD and info lines reach it once a second, so a
-  // process that dies during initialization loses them. Startup memory figures
-  // are only worth having if they survive that.
-  FlushLogging();
 }
 
 }  // namespace

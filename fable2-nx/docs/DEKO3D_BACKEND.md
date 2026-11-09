@@ -228,10 +228,17 @@ What is implemented:
 Memory, because this port runs at the edge of its Horizon pool (the profile
 measured **3281 of 3285 MiB** used at the menu):
 
-- `Deko3DDevice::Create()` and `Deko3DCommandProcessor::SetupContext()` log the
-  free heap and the unused process pool at every step and call `FlushLogging()`.
-  Info lines only reach the SD once a second, so a process that dies during
-  initialization otherwise loses exactly the lines that would explain it.
+- `Deko3DDevice::Create()` and `Deko3DCommandProcessor::SetupContext()` report the
+  remaining heap and the unused process pool at every step - as **warnings**,
+  because the SDK flushes warnings to the card as they are written while info
+  lines reach the SD at most once a second, so a process that dies during
+  initialization otherwise loses exactly the lines that would explain it. The
+  draw path does the same for "first draw" and "first swap".
+- The heap figure is `fake_heap_end - sbrk(0)`, **not** `mallinfo()`: newlib's
+  `struct mallinfo` reports its totals in `int`, this port's free heap is in the
+  gigabytes, and `fordblks` therefore overflows `INT_MAX` and prints a plausible
+  figure that means nothing. An earlier "2286 MiB free" reading was that
+  artifact, which is why the first memory diagnosis could not be trusted.
 - **The second graphics queue is gone.** D2 measured that a second graphics
   queue never executes its command lists, and each queue reserves its own
   per-warp scratch pool - so it was pure cost. Everything records into one list
