@@ -99,6 +99,11 @@ class Deko3DRenderTargetCache final : public RenderTargetCache {
   // split into several lists rather than overflowing it.
   void CountDrawRecorded();
 
+  // Emits the descriptor/shader cache invalidation once per command list, on the
+  // first draw that binds state. Draw-less frames therefore submit a list
+  // containing only their clears, as they did before the draw path existed.
+  void InvalidateCachesIfNeeded();
+
   // Waits, bounded, for the list submitted at the last swap. Call this before
   // work that submits and waits on its own list (a texture upload): the earlier
   // fence can only be satisfied first, so without this a stall is blamed on
@@ -175,6 +180,7 @@ class Deko3DRenderTargetCache final : public RenderTargetCache {
   // submit anyway.
   bool has_commands_ = false;
   uint32_t draws_since_submit_ = 0;
+  bool pending_cache_invalidate_ = false;
   std::function<void()> recording_reset_callback_;
 
   std::unordered_map<RenderTargetKey, std::unique_ptr<Target>, RenderTargetKey::Hasher>

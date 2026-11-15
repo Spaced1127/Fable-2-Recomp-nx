@@ -1413,9 +1413,12 @@ bool Deko3DCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
     return DrawSkipped("no_render_targets", detail);
   }
 
-  // Shaders. dk::Shader derives from DkShader, but an array of the derived
-  // pointers does not convert to an array of the base ones, so the handles are
-  // upcast individually.
+  // Shaders. The descriptor and shader caches are invalidated here rather than at
+  // the head of the list, so that a frame whose draws were all skipped submits
+  // nothing but its clears.
+  render_target_cache_->InvalidateCachesIfNeeded();
+  // dk::Shader derives from DkShader, but an array of the derived pointers does
+  // not convert to an array of the base ones, so they are upcast individually.
   const DkShader* const stages[2] = {&vertex_host_shader->shader,
                                      pixel_host_shader ? &pixel_host_shader->shader : nullptr};
   const uint32_t stage_mask = pixel_host_shader
@@ -1584,10 +1587,19 @@ void Deko3DCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
 #endif
   ReportFrameDrawStats();
   ++frame_index_;
+  // Flushed markers for the first few swaps: a GPU lockup leaves no crash record
+  // and no timeout, so the last line before the console stops is the only
+  // evidence of which step was in flight.
+  if (frame_index_ <= 3) {
+    REXGPU_WARN("deko3d: swap {}: submitting the render list", frame_index_ - 1);
+  }
   // Submit this frame's clears, draws and resolves before the presenter copies
   // the front buffer to the swapchain.
   if (render_target_cache_) {
     render_target_cache_->Flush();
+  }
+  if (frame_index_ <= 3) {
+    REXGPU_WARN("deko3d: swap {}: render list submitted", frame_index_ - 1);
   }
   DkFence* frame_fence =
       render_target_cache_ ? render_target_cache_->frame_fence() : nullptr;
@@ -1667,6 +1679,10 @@ void Deko3DCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
         return target_width != 0 || guest_gpu_pixels != 0 || guest_pixels != nullptr;
       });
   (void)refreshed;
+  if (frame_index_ <= 3) {
+    REXGPU_WARN("deko3d: swap {}: presented ({})", frame_index_ - 1, refreshed ? "guest output"
+                                                                              : "placeholder");
+  }
 }
 
 }  // namespace rex::graphics::deko3d

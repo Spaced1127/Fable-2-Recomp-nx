@@ -82,11 +82,19 @@ DkMsMode GetMsMode(uint32_t samples) {
 
 // Binds the multisample state matching a target, for operations (clears) issued
 // against it outside of a draw, where no pipeline state has been bound yet.
+//
+// Deliberately a no-op for single-sample targets: the 1x clear path is the one
+// that ran for whole minutes before this existed, and keeping it untouched means
+// a lock on 1x clears cannot be this. Only multisampled targets need the state.
 void BindTargetMultisample(dk::CmdBuf& command_buffer,
                            const Deko3DRenderTargetCache::Target& target) {
+  const uint32_t samples = target.msaa_samples();
+  if (samples <= 1) {
+    return;
+  }
   DkMultisampleState multisample;
   dkMultisampleStateDefaults(&multisample);
-  multisample.mode = GetMsMode(target.msaa_samples());
+  multisample.mode = GetMsMode(samples);
   multisample.rasterizerMode = multisample.mode;
   command_buffer.bindMultisampleState(multisample);
   command_buffer.setSampleMask(0xFFFFFFFFu);
@@ -204,10 +212,11 @@ bool Deko3DRenderTargetCache::EnsureRecording() {
     recording_reset_callback_();
   }
   // Drop whatever the GPU still holds cached of descriptors and shader code
-  // written since the previous list. This barrier alone is not a reason to
-  // submit: has_commands_ stays false until something real is recorded.
-  command_buffer_.barrier(DkBarrier_None,
-                          DkInvalidateFlags_Descriptors | DkInvalidateFlags_Shader);
+  // written since the previous list. Emitted lazily, on the first draw that
+  // actually binds something: a frame whose draws were all skipped contains only
+  // clears, and that list has to stay byte-identical to the one D2 ran hundreds
+  // of frames with. See InvalidateCachesIfNeeded().
+  pending_cache_invalidate_ = true;
   return true;
 }
 
@@ -239,6 +248,15 @@ void Deko3DRenderTargetCache::CountDrawRecorded() {
     return;
   }
   SubmitAndWaitForReuse();
+}
+
+void Deko3DRenderTargetCache::InvalidateCachesIfNeeded() {
+  if (!recording_ || !pending_cache_invalidate_) {
+    return;
+  }
+  pending_cache_invalidate_ = false;
+  command_buffer_.barrier(DkBarrier_None,
+                          DkInvalidateFlags_Descriptors | DkInvalidateFlags_Shader);
 }
 
 void Deko3DRenderTargetCache::SubmitAndWaitForReuse() {
