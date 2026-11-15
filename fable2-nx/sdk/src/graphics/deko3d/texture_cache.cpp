@@ -13,10 +13,20 @@
 #include <rex/graphics/deko3d/ring_buffer.h>
 #include <rex/graphics/deko3d/shared_memory.h>
 #include <rex/graphics/deko3d/texture_cache.h>
+#include <rex/cvar.h>
 #include <rex/graphics/pipeline/texture/conversion.h>
 #include <rex/graphics/pipeline/texture/info.h>
 #include <rex/logging.h>
 #include <rex/ui/deko3d/deko3d_device.h>
+
+REXCVAR_DEFINE_BOOL(deko3d_texture_upload, false, "GPU/deko3d",
+                    "Upload guest textures with the 2D engine. Off by default because a "
+                    "copyBufferToImage into a self-created image stalls this hardware's queue "
+                    "permanently, with a page-aligned block, a 16-byte-aligned source pitch "
+                    "padded to 4096 bytes and a plain RGBA8 format all already excluded - so "
+                    "every texture samples the white placeholder until the copy path is "
+                    "replaced. Turn on to reproduce the stall.")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 namespace rex::graphics::deko3d {
 
@@ -251,6 +261,11 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
   if (!load_base) {
     return true;
   }
+  if (!REXCVAR_GET(deko3d_texture_upload)) {
+    // Pretend the load succeeded: the draw path samples the placeholder anyway,
+    // and reporting failure would make the texture cache retry every request.
+    return true;
+  }
   if (upload_stopped_) {
     return false;
   }
@@ -413,6 +428,12 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
 bool Deko3DTextureCache::GetBoundTexture(uint32_t fetch_constant, bool want_signed,
                                          BoundTexture& out) {
   out = BoundTexture();
+  if (!REXCVAR_GET(deko3d_texture_upload)) {
+    // No texture is ever uploaded, so bind the draw path's white placeholder for
+    // all of them: the menu then renders untextured but with correct geometry,
+    // blending and depth, which is what the draw path needs to be validated on.
+    return false;
+  }
   if (fetch_constant >= xenos::kTextureFetchConstantCount) {
     return false;
   }
