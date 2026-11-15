@@ -293,6 +293,16 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
     return true;
   }
 
+  // Source row pitch for the copy. A 3840-byte row (960 px of RGBA8) wedged the
+  // 2D engine permanently, while the presenter's 5120-byte swapchain rows have
+  // been copied for thousands of frames without trouble, so the pitch is the
+  // one known-bad difference. Pad to a 4096-byte multiple - a multiple of every
+  // plausible tile and pitch granularity - and zero the padding.
+  constexpr uint32_t kSourcePitchAlignment = 4096;
+  const uint32_t source_pitch =
+      (row_bytes + kSourcePitchAlignment - 1) & ~(kSourcePitchAlignment - 1);
+  const uint32_t staging_bytes = source_pitch * blocks_high;
+
   const xenos::TextureFormat base_format = GetBaseFormat(key.format);
   const bool block_compressed = base_format == xenos::TextureFormat::k_DXT1 ||
                                 base_format == xenos::TextureFormat::k_DXT2_3 ||
@@ -303,9 +313,9 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
     ++logged_uploads;
     REXGPU_WARN(
         "deko3d: texture upload {} of {}x{} format {} -> deko {}, block {}, row {} "
-        "bytes, total {} bytes, tiled {}, {} layers",
+        "bytes (padded to {}), total {} bytes, tiled {}, {} layers",
         logged_uploads, width, height, uint32_t(key.format), uint32_t(deko_texture.format()),
-        int(block_compressed), row_bytes, total_bytes, int(key.tiled),
+        int(block_compressed), row_bytes, source_pitch, staging_bytes, int(key.tiled),
         key.depth_or_array_size_minus_1 + 1);
   }
   // Not refused: the draw path now waits the previous list before an upload
@@ -319,8 +329,9 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
   // of the mapped region does not report an error - it stalls the queue with the
   // fence never signaling (measured: the first texture upload of the first real
   // frame wedged the graphics queue permanently).
+  // Round the block to whole pages as well as covering the padded pitch.
   const uint32_t staging_size =
-      (total_bytes + DK_MEMBLOCK_ALIGNMENT - 1) & ~uint32_t(DK_MEMBLOCK_ALIGNMENT - 1);
+      (staging_bytes + DK_MEMBLOCK_ALIGNMENT - 1) & ~uint32_t(DK_MEMBLOCK_ALIGNMENT - 1);
   dk::UniqueMemBlock staging =
       dk::MemBlockMaker{device_.device(), staging_size}
           .setFlags(DkMemBlockFlags_CpuCached | DkMemBlockFlags_GpuCached)
@@ -333,6 +344,9 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
   const uint8_t* source = static_cast<Deko3DSharedMemory&>(shared_memory()).cpu_address() +
                           (key.base_page << 12);
   uint8_t* destination = static_cast<uint8_t*>(staging.getCpuAddr());
+  // Zero first so the pitch padding between rows is defined; the copy reads the
+  // whole padded rows.
+  std::memset(destination, 0, staging_size);
   const uint32_t endian = uint32_t(key.endianness);
   auto copy_block = [endian](void* output, const void* input, size_t length) {
     texture_conversion::CopySwapBlock(xenos::Endian(endian), output, input, length);
@@ -345,23 +359,20 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
     untile_info.width = blocks_wide;
     untile_info.height = blocks_high;
     untile_info.input_pitch = base.row_pitch_bytes / bytes_per_block;
-    untile_info.output_pitch = blocks_wide;
+    // Untile writes whole rows at this pitch, so the padded stride is applied
+    // here rather than by copying row by row afterwards.
+    untile_info.output_pitch = source_pitch / bytes_per_block;
     untile_info.input_format_info = format_info;
     untile_info.output_format_info = format_info;
     untile_info.copy_callback = copy_block;
     texture_conversion::Untile(destination, source, &untile_info);
   } else {
     for (uint32_t y = 0; y < blocks_high; ++y) {
-      copy_block(destination + size_t(y) * row_bytes,
+      copy_block(destination + size_t(y) * source_pitch,
                  source + size_t(y) * base.row_pitch_bytes, row_bytes);
     }
   }
 
-  if (staging_size > total_bytes) {
-    // The copy reads whole pages from this block, so make the tail past the
-    // texture's own bytes defined instead of whatever the page held.
-    std::memset(destination + total_bytes, 0, staging_size - total_bytes);
-  }
   if (!FlushCpuRange(staging, 0, staging_size)) {
     REXGPU_ERROR("deko3d: texture staging cache flush failed");
     return false;
@@ -371,8 +382,9 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
   upload_command_buffer_.addMemory(upload_command_memory_, 0, kUploadCommandSize);
   DkCopyBuf source_buffer{};
   source_buffer.addr = staging.getGpuAddr();
-  source_buffer.rowLength = row_bytes;
-  source_buffer.imageHeight = total_bytes;
+  // The padded pitch, matching how the staging buffer was written above.
+  source_buffer.rowLength = source_pitch;
+  source_buffer.imageHeight = staging_bytes;
   dk::ImageView destination_view{deko_texture.image()};
   destination_view.setMipLevels(0, 1);
   const DkImageRect destination_rect{0, 0, 0, width, height, 1};
