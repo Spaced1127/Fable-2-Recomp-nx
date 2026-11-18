@@ -1688,6 +1688,13 @@ void Deko3DCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
   if (frame_index_ <= 3) {
     REXGPU_WARN("deko3d: swap {}: submitting the render list", frame_index_ - 1);
   }
+  // Run-077: the copy-only upload prologue goes FIRST - submitted and kicked
+  // before the draw list, so the 2D copies run outside the render pass (the
+  // frame context that faults the channel; run-076's 2x2 proved the copies
+  // themselves legal). Queue order then orders them before every draw.
+  if (texture_cache_) {
+    texture_cache_->SubmitUploadPrologue();
+  }
   // Submit this frame's clears, draws and resolves before the presenter copies
   // the front buffer to the swapchain.
   if (render_target_cache_) {

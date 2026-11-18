@@ -52,15 +52,15 @@ void Fable2App::OnPreSetup(rex::RuntimeConfig& config) {
   // Build identity for hardware logs. The NRO hash cannot be baked in here
   // (a rebuild changes it), so the tag names the build family and the runner
   // verifies the hash with Get-FileHash. Warn so it is flushed at once.
-  REXLOG_WARN("[fable2] build tag: m1-f1-076 "
-              "(2x2 source x destination matrix with KNOWN 0x5A content: setup/texture staging "
-              "x setup/texture image, per-cell flags/extent/readback; upload probe verdict fixed "
-              "(guest data is not 0x5A) + SOURCE staging CPU-side bytes; alignment kept; strategy "
-              "frozen until the table is in)");
+  REXLOG_WARN("[fable2] build tag: m1-f1-077 "
+              "(PROLOGUE LIST: uploads ride a dedicated copy-only cmdbuf submitted+kicked "
+              "before the draw list - no RT/texture binds; run-076 2x2 all PASS = frame context "
+              "was the fault; guest mirror SOURCE pages logged (run-076: staging empty CPU-side); "
+              "delay/cohorts/depth-skip/alignment kept)");
   // Run-071: stamp the crash blocks / marker file with this build's identity, so
   // stale blocks (the exit() record dates to runs 057/058) cannot be mistaken
   // for the current death.
-  RexSetCrashBuildTag("m1-f1-076");
+  RexSetCrashBuildTag("m1-f1-077");
   // Proves which witnesses this binary carries: run 059's log had no
   // [vm-lookup] line and could not say whether the hook was missing or had simply
   // not been reached before the process died.

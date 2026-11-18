@@ -61,6 +61,27 @@ no fault information).
   gui_textures.bnk read, crash block `98A1A23D` identical) and is a separate
   defect (F2), not chased ahead of F1.
 
+## MEASUREMENT-ARTEFACT CORRECTION (run-076 - do not re-derive the old claims)
+
+The "copies landed zeros" conclusions of runs 074/075 were **probe verdict
+artefacts**: the probe checked the readback for `0x5A`, but upload staging holds
+decoded GUEST data - the pattern was never in the source. Run-076's 2x2 with
+KNOWN 0x5A content proved **A=B=C=D=PASS**: the copy primitive, both staging
+kinds (flags 0x9 CpuUncached|GpuCached, no flush needed), the texture-cache
+images (flags 0x800, GpuCached|Image mem, offset 0) and the descriptors are ALL
+legal in isolation. **"width%64 is the discriminator" is RETRACTED as the fault
+cause** (alignment is kept - deko3d pads layouts anyway - but it did not fix
+the fault). The fault is the FRAME CONTEXT: copies inside the frame's draw
+list kill the channel; the same copies in a copy-only list are fine. Run-077
+moves uploads to a prologue list submitted before the draw list.
+
+**Second, separate finding (run-076 SOURCE line):** the upload staging is
+all-zero CPU-side BEFORE the copy ("0 non-zero of first 4096") - the guest
+mirror pages the upload reads (`shared_memory + base_page<<12`) are EMPTY.
+Even a perfect copy lands zeros until the guest's texture data reaches the
+mirror. This is an F1-content (M3) source-data problem, distinct from the
+channel fault; run-077 logs the guest source pages directly to name it.
+
 ## The open question (F1) - the copy question is ANSWERED
 
 Run 068: **EXECUTED** - the 2D copy lands the pattern. Run 069 answered the
@@ -88,20 +109,20 @@ powershell -ExecutionPolicy Bypass -File H:\Projects\Fable2Port\Fable-2-Recomp-n
 ```
 
 The staged package is `H:\Projects\Fable2Port\stage\switch\Fable II`
-(`fable_2.nro`, `fable_2.toml`, `fable2_config.toml`; run-076 NRO hash in
-`docs/RUN_076.md`). The user copies the three files to `E:\switch\Fable II`,
-launches full-memory, and returns the **whole `logs/` folder as-is INCLUDING
-`logs/rex/`** (never renamed) + a photo. Read (first second of the log):
-- `[copy-matrix] A/B/C/D ...` - the 2x2 with readback bytes per cell, staging
-  flags/size/flush, DkCopyBuf, rect, dest flags/layout/align/offset/mem-flags;
-- `[copy-matrix] verdict: ... -> SOURCE staging / DESTINATION tex-image /
-  frame context` - the one-line answer;
-- `[upload-sync] probe #N SOURCE staging CPU-side ...` (~8.4 s) - zero staging
-  on the CPU = the guest mirror pages are empty (source-data fault);
-- `[gpu-error]` / survival - unchanged witnesses.
-Then act ONLY on the named side: source -> staging flags/flush/guest mirror;
-destination -> full DkImageSettings + 2D-engine offset alignment + a fresh
-dedicated block; frame context -> the first sampling draw's descriptor.
+(`fable_2.nro`, `fable_2.toml`, `fable2_config.toml`; run-077 NRO hash in
+`docs/RUN_077.md`). The user copies the three files to `E:\switch\Fable II`,
+launches full-memory, **lets it run 3+ minutes**, and returns the **whole
+`logs/` folder as-is INCLUDING `logs/rex/`** (never renamed) + a photo. Read:
+- `[upload-prologue] N copies submitted ... before frame submit #K` - the
+  prologue is riding ahead of the draw list;
+- `[gpu-error]` - must be GONE for 60 s (1800+ presents); if present, the
+  correlation dump names the inherited state (last prologue/frame/bind);
+- `[guest-readback] #30/#150` - fnv1a differs = guest animating (F1);
+- `[upload-src] guest mirror base_page=... N non-zero of 4096` - MIRROR EMPTY
+  = the M3 source-data thread (guest texture writes not reaching the mirror);
+  pursue it once survival is proven, one thread at a time.
+Acceptance: no queue error 60 s + fnv1a differs + screen not white (geometry
+may appear even with empty textures).
 
 ## Evidence
 
@@ -193,14 +214,14 @@ the 2026-11-15 quiet-mode order in every respect.
 - Persist this for every future session; it replaces the quiet-mode section that
   used to live here.
 
-Last hardware run: **075** (2026-11-18, **alignment NOT the cause** - aligned
-copies still land zeros, fence true/error=no; same fatal kick at #157; the
-probe's 0x5A verdict was meaningless for guest data - fixed). Next: run-076
-(**2x2 source x destination matrix with KNOWN 0x5A content: setup/texture
-staging x setup/texture image (real CreateTexture path), per-cell
-flags/extent/flush/readback + one-line verdict; probe now logs SOURCE staging
-CPU-side bytes; strategy frozen until the table is in**) - built and staged,
-NRO hash in `docs/RUN_076.md`, tag `m1-f1-076`, unverified.
+Last hardware run: **076** (2026-11-18, **2x2 A=B=C=D=PASS: copies/staging/
+images/flags all innocent - the FRAME CONTEXT faults the channel**; second
+finding: guest mirror pages EMPTY CPU-side = separate M3 source-data fault;
+074/075 zero verdicts corrected as probe artefacts). Next: run-077 (**uploads
+moved to a copy-only PROLOGUE list submitted+kicked before the draw list - no
+RT/texture binds; [upload-src] logs the guest mirror pages; delay/cohorts/
+depth-skip/alignment kept; deko3d_upload_prologue=false for A/B**) - built and
+staged, NRO hash in `docs/RUN_077.md`, tag `m1-f1-077`, unverified.
 
 **Run-067 result, in one line:** the copy-only bisect logged `copy fence TIMEOUT
 after up to 1000 ms` for the tiled destination (flags 0x800, size 2949120, align
@@ -339,6 +360,7 @@ Does not work yet:
 | 073 | 1447E178 | **Barrier + delay in; fault UNCHANGED - the COPY ITSELF faults.** `barrier after copy: DkBarrier_Full(4) invalidate=0x15`; one-frame delay active; `[gpu-error] right after present #158 kick`; frame #157 carried 3 copies and NO draw sampled the new images (delay) - so not read-while-write, not a missing barrier. **Flags audit from [tex-image]: every tex-cache image HAS flags=0x800** (missing-flag hypothesis disproved): 480x360 RGBA8 layout 737280 align 512; 240x180 RGB10A2 layout 245760 (PADDED) align 512; depth 960x720 layout 5898240 align 65536 (skipped/never bound). Remaining differences vs the proven setup copy: RGB10A2 format (untested) and **height 180 %8 = 4** (block-linear GOB height; every proven-good copy had height%8=0). Run-074: copies-only probe per shape (submit ONLY the copy + waitIdle + readback, PASS/FAIL + full flags/extent table), setup-test reference params logged, guest-readback gated off. |
 | 074 | 404D5845 | **FOUND IT: destination WIDTH%64 is the discriminator.** Copies-only probes (flags 0x800, fence signalled, error=no): 960x720 (w%64=0) PASS [5A5A5A5A]; 480x360 (w%64=32, h%8=0) FAIL [00000000]; 240x180 RGB10A2 (w%64=48) FAIL [00000000]. Height is NOT it (480x360 h%8=0 fails). Unaligned-width copies land ZERO bytes in isolation and fault the channel in-frame - the ~9.4 s death. deko3d tiled-layout requirement for 2D-engine destinations. Run-075 fix: image layout at aligned w64/h8, copy rect + staging rows use the aligned extent (decode stays logical, memset zeroes padding), LOGICAL size kept for descriptor/UVs (UV scale logical/aligned = M3 caveat); probe re-runs first, guest-readback re-enabled. |
 | 075 | 8EF9DBB3 | **Alignment NOT the cause.** Aligned widths (480->512 %64=0, 240->256, heights 360/184 %8=0, flags 0x800, sane layouts) STILL land [00000000]; fence true, error=no, waitIdle 5 ms; same fatal error at present #157. **Probe bug found:** the 0x5A verdict was meaningless - upload staging holds decoded GUEST data, never 0x5A. Run-076: 2x2 source x destination matrix with KNOWN 0x5A content (setup/texture staging x setup/texture image via real CreateTexture), per-cell flags/extent/flush/readback + one-line verdict; probe verdict fixed (non-zero data) + SOURCE staging CPU-side bytes logged (zero staging = guest mirror source-data fault). Strategy frozen until the table is in. |
+| 076 | 9DD0C6B1 | **2x2 ALL PASS - frame context is the fault; mirror empty is a second fault.** A=B=C=D=PASS: copy primitive, staging (0x9, no flush), tex-images (0x800/0x28/offset 0), descriptors all legal in isolation. Copies inside the draw list kill the channel; copy-only lists are fine. ALSO: `[upload-sync] SOURCE staging CPU-side ... 0 non-zero of first 4096` - the guest mirror pages are EMPTY (separate M3 source-data fault). Correction block added: 074/075 zero verdicts were probe artefacts; width%64 retracted as cause. Run-077: uploads moved to a copy-only PROLOGUE list submitted+kicked before the draw list (no RT/texture binds); [upload-src] logs the guest mirror pages directly; delay/cohorts/depth/alignment kept. |
 
 ### Run-048 result: break located inside sub_8233EEE0
 

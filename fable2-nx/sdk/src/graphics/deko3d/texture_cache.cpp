@@ -114,6 +114,16 @@ REXCVAR_DEFINE_BOOL(deko3d_copy_matrix, true, "GPU/deko3d",
                     "with 0x5A content, per-cell flags/extent/readback line (run-076).")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
+// Run-077: uploads ride a dedicated copy-only PROLOGUE list submitted right
+// before the frame's draw list (run-076: copies are legal in isolation; the
+// frame context - bound RTs / open 3D state - is what faults the channel).
+// false restores the legacy in-draw-list path for A/B.
+REXCVAR_DEFINE_BOOL(deko3d_upload_prologue, true, "GPU/deko3d",
+                    "Record uploads into a copy-only prologue list submitted before the draw "
+                    "list (no RT/texture binds). Run-077 structural fix for the frame-context "
+                    "channel fault; false = legacy in-frame-list uploads.")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
 // Run-075: re-enabled - with the alignment fix the upload batch should survive,
 // and the readback is the F1 evidence (does the guest output start animating).
 REXCVAR_DEFINE_BOOL(deko3d_guest_readback, true, "GPU/deko3d",
@@ -1483,6 +1493,38 @@ bool Deko3DTextureCache::RunCopyMatrix() {
   return a && b && c && d;
 }
 
+// Run-077: submit the accumulated copy-only prologue list, immediately BEFORE
+// the frame's draw list is submitted (called from IssueSwap). Nothing is bound
+// in this list - no render targets, no textures, no draws - so the 2D copies
+// run outside the render pass that faults the channel. Flushed (kicked) here so
+// the copies execute even before the draw list is recorded; queue order then
+// orders them before every draw of the frame.
+void Deko3DTextureCache::SubmitUploadPrologue() {
+  if (!prologue_open_) {
+    return;
+  }
+  prologue_open_ = false;
+  const uint32_t copies = prologue_copies_;
+  prologue_copies_ = 0;
+  const DkCmdList list = upload_command_buffer_.finishList();
+  {
+    std::lock_guard lock(device_.submit_mutex());
+    device_.queue().submitCommands(list);
+    device_.queue().signalFence(prologue_fence_, true);
+    device_.queue().flush();
+  }
+  NoteGpuSubmit();
+  static uint32_t prologue_submits = 0;
+  ++prologue_submits;
+  if (prologue_submits <= 12 || (prologue_submits % 64) == 0) {
+    REXGPU_WARN("[upload-prologue] {} copy/copies submitted in a copy-only list (no RT, no "
+                "texture binds, no draws) before frame submit #{}",
+                copies, FrameSubmitEpoch() + 1);
+  }
+  rex::NoteHostAction("upload-prologue %u copies before frame submit #%llu", copies,
+                      static_cast<unsigned long long>(FrameSubmitEpoch() + 1));
+}
+
 std::unique_ptr<TextureCache::Texture> Deko3DTextureCache::CreateTexture(TextureKey key) {
   DkImageFormat format;
   if (!GetDekoImageFormat(key.format, format)) {
@@ -1668,6 +1710,22 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
 
   const uint8_t* source = static_cast<Deko3DSharedMemory&>(shared_memory()).cpu_address() +
                           (key.base_page << 12);
+  // Run-077: run-076's SOURCE line showed the staging all-zero CPU-side - name
+  // the GUEST pages themselves, before decode: if the mirror is empty here, no
+  // copy can land pixels (an F1/M3 source-data problem, not a copy problem).
+  static uint32_t logged_src_pages = 0;
+  if (logged_src_pages < 8) {
+    ++logged_src_pages;
+    uint32_t nz = 0;
+    for (uint32_t i = 0; i < 4096; ++i) {
+      if (source[i]) ++nz;
+    }
+    REXGPU_WARN("[upload-src] guest mirror base_page={} (cpu {}): first bytes "
+                "[{:02X}{:02X}{:02X}{:02X} {:02X}{:02X}{:02X}{:02X}], {} non-zero of 4096{}",
+                uint32_t(key.base_page), fmt::ptr(source), source[0], source[1], source[2],
+                source[3], source[4], source[5], source[6], source[7], nz,
+                nz ? "" : " - MIRROR EMPTY: guest texture data has not reached shared memory");
+  }
   uint8_t* destination = static_cast<uint8_t*>((*staging).getCpuAddr());
   // Zero first so the pitch padding between rows is defined; the copy reads the
   // whole padded rows.
@@ -1733,7 +1791,7 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
   // resource. The setup-test image (960x720 RGBA8, flags 0x800, layout 2949120,
   // align 512) PASSED; compare against its parameters below.
   static uint32_t sync_probes = 0;
-  if (REXCVAR_GET(deko3d_upload_sync_probe) && sync_probes < 4 &&
+  if (REXCVAR_GET(deko3d_upload_sync_probe) && sync_probes < 4 && !prologue_open_ &&
       !device_.queue().isInErrorState()) {
     ++sync_probes;
     const uint64_t src_extent = uint64_t(source_pitch) * aligned_blocks_high;
@@ -1858,15 +1916,29 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
     return true;
   }
 
-  // Run-066: record into the FRAME's command list when the command processor can
-  // give us one: the frame's presentImage kicks the channel, so the copy executes
-  // with the frame. Run-068 correction: run 065's "standalone lists never reach
-  // the GPU" was a missing-kickoff artefact (submitCommands/signalFence only
-  // append GPFIFO entries; only flush/presentImage/waitIdle kick) - the copy
-  // itself EXECUTES and lands the pattern (descriptor A: rowLength in bytes,
-  // imageHeight in rows). The immediate-submit path below survives as the
-  // fallback and now flushes explicitly so its fence can signal.
-  dk::CmdBuf* frame_cmdbuf = frame_recorder_ ? frame_recorder_() : nullptr;
+  // Run-077: the PROLOGUE list. Run-076's 2x2 proved the copies/staging/images
+  // are all legal in isolation (A=B=C=D=PASS) - the fault is the FRAME CONTEXT:
+  // copies recorded inside the draw list (render targets bound, 3D state open)
+  // kill the channel. Uploads now go into a DEDICATED copy-only cmdbuf with no
+  // draws and no render targets / textures bound, submitted immediately BEFORE
+  // the frame's draw list (SubmitUploadPrologue at IssueSwap). Queue order gives
+  // the ordering for free; the Full barrier stays (cheap). The one-frame
+  // sampling delay and staging cohorts are unchanged. deko3d_upload_prologue=
+  // false restores the old in-frame-list path for A/B.
+  const bool use_prologue = REXCVAR_GET(deko3d_upload_prologue);
+  dk::CmdBuf* frame_cmdbuf = nullptr;
+  if (use_prologue) {
+    if (!prologue_open_) {
+      upload_command_buffer_.clear();
+      upload_command_buffer_.addMemory(upload_command_memory_, 0, kUploadCommandSize);
+      prologue_open_ = true;
+      prologue_copies_ = 0;
+    }
+    frame_cmdbuf = &upload_command_buffer_;
+    ++prologue_copies_;
+  } else {
+    frame_cmdbuf = frame_recorder_ ? frame_recorder_() : nullptr;
+  }
   if (frame_cmdbuf) {
     DkCopyBuf to_image{};
     to_image.addr = (*staging).getGpuAddr();
@@ -1896,13 +1968,16 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
     deko_texture.set_upload_cohort(FrameSubmitEpoch() + 1);
     static uint32_t frame_recorded = 0;
     ++frame_recorded;
-    rex::NoteHostAction("upload #%u recorded into FRAME list (rowLength=%u imageHeight=%u)",
-                        frame_recorded, source_pitch, aligned_blocks_high);
+    rex::NoteHostAction("upload #%u recorded into %s list (rowLength=%u imageHeight=%u)",
+                        frame_recorded, use_prologue ? "PROLOGUE" : "FRAME", source_pitch,
+                        aligned_blocks_high);
     if (frame_recorded <= 8 || (frame_recorded % 128) == 0) {
-      REXGPU_WARN("[upload] #{} {}x{} (aligned {}x{}) recorded into the FRAME list (copy executes "
-                  "with the frame, rowLength {} bytes, imageHeight {} rows)",
-                  frame_recorded, width, height, aligned_w, aligned_h, source_pitch,
-                  aligned_blocks_high);
+      REXGPU_WARN("[upload] #{} {}x{} (aligned {}x{}) recorded into the {} list (rowLength {} "
+                  "bytes, imageHeight {} rows)",
+                  frame_recorded, width, height, aligned_w, aligned_h,
+                  use_prologue ? "PROLOGUE (copy-only, submitted before the draw list)"
+                               : "FRAME (legacy in-draw-list path)",
+                  source_pitch, aligned_blocks_high);
     }
     // Run-070: staging lifetime pinned to the frame the copy RIDES, not to the
     // present epoch at pin time. Cohort = the next frame submit; release only

@@ -48,6 +48,10 @@ class Deko3DTextureCache final : public TextureCache {
     frame_recorder_ = std::move(recorder);
   }
 
+  // Run-077: submit the accumulated copy-only upload prologue list immediately
+  // before the frame's draw list (called from IssueSwap). No-op when empty.
+  void SubmitUploadPrologue();
+
   // What a draw binds for one texture fetch constant.
   struct BoundTexture {
     dk::Image* image = nullptr;
@@ -107,6 +111,11 @@ class Deko3DTextureCache final : public TextureCache {
   FenceWaitStats upload_fence_stats_;
   bool upload_stopped_ = false;
   std::function<dk::CmdBuf*()> frame_recorder_;
+  // Run-077: the copy-only prologue list accumulates uploads during frame
+  // recording and is submitted (flushed) right before the draw list.
+  bool prologue_open_ = false;
+  uint32_t prologue_copies_ = 0;
+  dk::Fence prologue_fence_{};
   // Set by RunUploadValidate (step 0): whether a fence signalled in a clean
   // process. Retirement prefers fences when they work and falls back to age.
   bool fences_signalled_ = false;
