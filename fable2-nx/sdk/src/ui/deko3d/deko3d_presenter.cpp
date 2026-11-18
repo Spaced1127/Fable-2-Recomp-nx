@@ -21,9 +21,12 @@
 #include <switch.h>
 #include <deko3d.hpp>
 
+#include <rex/cvar.h>
 #include <rex/graphics/deko3d/fence_wait.h>  // NoteGpuSubmit (run-060 age retirement)
 #include <rex/host_action.h>
 #include <rex/logging.h>
+
+REXCVAR_DECLARE(bool, deko3d_guest_readback);  // defined in texture_cache.cpp
 #include <rex/ui/deko3d/deko3d_device.h>
 #include <rex/ui/deko3d/deko3d_presenter.h>
 #include <rex/ui/surface_switch.h>
@@ -570,8 +573,10 @@ Presenter::PaintResult Deko3DPresenter::PaintAndPresentImpl(bool execute_ui_draw
     impl_->present_fence_at = impl_->present_count;
     // Run-069 (F1): at present 30 and 150, read back this exact source image -
     // the decisive blank/content question, answered with pixels, not inference.
+    // Run-074: gated off (one question per run while the copies-only probe runs).
     const uint32_t upcoming = impl_->present_count + 1;
-    if ((upcoming == 30 || upcoming == 150) && impl_->guest_readbacks_done < 2) {
+    if (REXCVAR_GET(deko3d_guest_readback) &&
+        (upcoming == 30 || upcoming == 150) && impl_->guest_readbacks_done < 2) {
       ++impl_->guest_readbacks_done;
       impl_->ReadBackGuestOutputLocked(queue, upcoming);
     }

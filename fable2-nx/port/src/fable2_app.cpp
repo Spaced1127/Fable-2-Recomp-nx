@@ -52,15 +52,14 @@ void Fable2App::OnPreSetup(rex::RuntimeConfig& config) {
   // Build identity for hardware logs. The NRO hash cannot be baked in here
   // (a rebuild changes it), so the tag names the build family and the runner
   // verifies the hash with Get-FileHash. Warn so it is flushed at once.
-  REXLOG_WARN("[fable2] build tag: m1-f1-073 "
-              "(GPU fault at the first sampling kick: Full barrier + Image|Descriptors|L2 "
-              "invalidate after copies; one-frame sampling delay - bind only after the copy's "
-              "frame submitted; depth-skipped images never bind; probe off; frame/image "
-              "correlation at the error witness; short-read flood removed)");
+  REXLOG_WARN("[fable2] build tag: m1-f1-074 "
+              "(decisive copies-only probe: first 4 uploads submit ONLY the copy + waitIdle + "
+              "readback, PASS/FAIL per shape with full flags/extent table vs the setup-test "
+              "image; guest-readback gated off; barrier/delay/depth rules kept)");
   // Run-071: stamp the crash blocks / marker file with this build's identity, so
   // stale blocks (the exit() record dates to runs 057/058) cannot be mistaken
   // for the current death.
-  RexSetCrashBuildTag("m1-f1-073");
+  RexSetCrashBuildTag("m1-f1-074");
   // Proves which witnesses this binary carries: run 059's log had no
   // [vm-lookup] line and could not say whether the hook was missing or had simply
   // not been reached before the process died.

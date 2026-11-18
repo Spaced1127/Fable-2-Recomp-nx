@@ -95,6 +95,24 @@ REXCVAR_DEFINE_BOOL(deko3d_upload_defer_sampling, true, "GPU/deko3d",
                     "discriminator for the GPU fault on the first sampling frame.")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
+// Run-074: the decisive copies-only probe. Run-073 proved the fault persists
+// with the barrier AND the one-frame delay (no draw sampled the new images in
+// the fatal frame) - so the COPY COMMAND itself faults on the texture-cache
+// images. For the first 4 uploads, submit ONLY the copy (dedicated cmdbuf, no
+// draws), flush, bounded waitIdle, read 64x64 back, and print PASS/FAIL with the
+// full flags/extent table next to the setup-test image's parameters.
+REXCVAR_DEFINE_BOOL(deko3d_upload_sync_probe, true, "GPU/deko3d",
+                    "First 4 uploads: copies-only submit + waitIdle + readback per shape, with "
+                    "the full image flags/extent table. Names the illegal copy/image (run-074).")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
+// Run-074: one question per run - the guest-output readback is gated off while
+// the copies-only probe runs (its #150 submit lands near the upload batch).
+REXCVAR_DEFINE_BOOL(deko3d_guest_readback, false, "GPU/deko3d",
+                    "Guest-output image readback at present 30/150. Off for run-074 (one "
+                    "question per run); re-enable for F1 content work once the fault is fixed.")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
 // Run-068: descriptors B (imageHeight = total bytes - the run-060 OS-kill DMA if
 // it executes) and C (tight 0/0) are opt-in. A alone decides the verdict for the
 // descriptor the port uses; one measured variable per hardware run.
@@ -121,6 +139,36 @@ REXCVAR_DEFINE_BOOL(deko3d_upload_no_wait, true, "GPU/deko3d",
                     "submit is flushed so the fence signals and retires staging. Set false for "
                     "a bounded wait per texture (fences signal in ~5 ms once kicked - run 068).")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
+namespace {
+
+// Run-074: dkQueueWaitIdle has no timeout; observe it in a worker with a bounded
+// window so the log always returns. A faulted channel never goes idle.
+bool BoundedQueueWaitIdle(dk::Queue queue, const char* what, int window_ms) {
+  std::atomic<bool> returned{false};
+  std::thread worker([queue, &returned]() mutable {
+    queue.waitIdle();
+    returned.store(true, std::memory_order_release);
+  });
+  const auto start = std::chrono::steady_clock::now();
+  for (int i = 0; i < window_ms / 5 && !returned.load(std::memory_order_acquire); ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  const bool ok = returned.load(std::memory_order_acquire);
+  const int64_t ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                         std::chrono::steady_clock::now() - start)
+                         .count();
+  if (ok) {
+    worker.join();
+  } else {
+    worker.detach();
+  }
+  REXGPU_WARN("[upload-sync] {}: waitIdle {} after {} ms", what,
+              ok ? "RETURNED" : "DID NOT RETURN (channel faulted)", ms);
+  return ok;
+}
+
+}  // namespace
 
 namespace rex::graphics::deko3d {
 
@@ -331,6 +379,8 @@ class Deko3DTextureCache::TextureImpl final : public Texture {
   // the copy's frame has been submitted and kicked (one-frame sampling delay).
   uint64_t upload_cohort() const { return upload_cohort_; }
   void set_upload_cohort(uint64_t cohort) { upload_cohort_ = cohort; }
+  uint64_t layout_size() const { return layout_.getSize(); }
+  uint32_t layout_align() const { return layout_.getAlignment(); }
 
   dk::Image& image() { return image_; }
   DkImageFormat format() const { return format_; }
@@ -1089,6 +1139,13 @@ bool Deko3DTextureCache::RunCopySyncTest() {
   }
   dk::Image image{};
   image.initialize(layout, image_memory, 0);
+  // Run-074: the proven-good reference parameters, in the same format as the
+  // texture-cache [tex-image] lines, so the flags/extent table compares directly.
+  REXGPU_WARN("[tex-image] SETUP-TEST created {}x{}x1 fmt={} type=2 flags=0x{:X} "
+              "layout-size={} align={} gpu=0x{:X} offset=0 (proven-good reference)",
+              kW, kH, uint32_t(DkImageFormat_RGBA8_Unorm),
+              uint32_t(DkImageFlags_Usage2DEngine), image_size, image_align,
+              uint64_t(image.getGpuAddr()));
   dk::ImageView view{image};
   view.setMipLevels(0, 1);
 
@@ -1470,6 +1527,113 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
                 uint32_t(deko_texture.format()), staging_size, int(key.tiled),
                 key.depth_or_array_size_minus_1 + 1);
     device_.LogMemory("texture upload");
+  }
+
+  // Run-074: the decisive copies-only probe. Run-073's fatal frame carried ONLY
+  // these copies (the one-frame delay meant no draw sampled the new images), so
+  // the copy command itself faults the channel on the texture-cache images.
+  // Submit ONLY the copy - no draws, no sampling - then waitIdle and read back.
+  // PASS/FAIL per shape with the full flags/extent table names the illegal
+  // resource. The setup-test image (960x720 RGBA8, flags 0x800, layout 2949120,
+  // align 512) PASSED; compare against its parameters below.
+  static uint32_t sync_probes = 0;
+  if (REXCVAR_GET(deko3d_upload_sync_probe) && sync_probes < 4 &&
+      !device_.queue().isInErrorState()) {
+    ++sync_probes;
+    const uint64_t src_extent = uint64_t(source_pitch) * blocks_high;
+    REXGPU_WARN("[upload-sync] probe #{} {}x{} xenos{}->deko{}: image flags=0x{:X} "
+                "layout-size={} align={} gpu=0x{:X} offset=0 mem={} | rect={}x{} "
+                "(height%8={} width%64={}) | src rowLength={} imageHeight={} extent={} "
+                "staging={} | layout>=rect-bytes: {} | COPY-ONLY, no draws",
+                sync_probes, width, height, uint32_t(key.format),
+                uint32_t(deko_texture.format()), uint32_t(DkImageFlags_Usage2DEngine),
+                deko_texture.layout_size(), deko_texture.layout_align(),
+                uint64_t(deko_texture.image().getGpuAddr()), deko_texture.layout_size(),
+                width, height, height % 8, width % 64, source_pitch, blocks_high,
+                src_extent, staging_size,
+                deko_texture.layout_size() >= uint64_t(width) * height * 4 ? "yes" : "NO");
+    upload_command_buffer_.clear();
+    upload_command_buffer_.addMemory(upload_command_memory_, 0, kUploadCommandSize);
+    DkCopyBuf probe_src{};
+    probe_src.addr = (*staging).getGpuAddr();
+    probe_src.rowLength = source_pitch;
+    probe_src.imageHeight = blocks_high;
+    dk::ImageView probe_dst{deko_texture.image()};
+    probe_dst.setMipLevels(0, 1);
+    const DkImageRect probe_rect{0, 0, 0, width, height, 1};
+    upload_command_buffer_.copyBufferToImage(probe_src, probe_dst, probe_rect);
+    upload_command_buffer_.barrier(DkBarrier_Full, DkInvalidateFlags_Image |
+                                                       DkInvalidateFlags_Descriptors |
+                                                       DkInvalidateFlags_L2Cache);
+    const DkCmdList probe_list = upload_command_buffer_.finishList();
+    dk::Fence probe_fence{};
+    {
+      std::lock_guard lock(device_.submit_mutex());
+      device_.queue().submitCommands(probe_list);
+      device_.queue().signalFence(probe_fence, true);
+      device_.queue().flush();
+    }
+    NoteGpuSubmit();
+    rex::NoteHostAction("upload-sync probe #%u %ux%u deko%u submitted (copy-only)", sync_probes,
+                        width, height, uint32_t(deko_texture.format()));
+    const bool idle_ok = BoundedQueueWaitIdle(device_.queue(), "copy-only", 2000);
+    const bool fence_ok = probe_fence.wait(0) == DkResult_Success;
+    const bool err = device_.queue().isInErrorState();
+    if (!idle_ok || err) {
+      REXGPU_WARN("[upload-sync] probe #{} {}x{} deko{}: FAIL-WEDGED (waitIdle returned={}, "
+                  "fence={}, queue error={}) - THIS copy/image is illegal; values above",
+                  sync_probes, width, height, uint32_t(deko_texture.format()), idle_ok,
+                  fence_ok, err);
+      rex::NoteHostAction("upload-sync probe #%u FAIL-WEDGED %ux%u deko%u", sync_probes, width,
+                          height, uint32_t(deko_texture.format()));
+      deko_texture.set_upload_cohort(UINT64_MAX);  // never bind a faulted image
+      return true;
+    }
+    // Read 64x64 back (CpuUncached: the CPU must read DRAM, not its pre-fill).
+    static dk::UniqueMemBlock probe_rb;
+    if (!probe_rb) {
+      probe_rb = dk::MemBlockMaker{device_.device(), 4096 * 64}
+                     .setFlags(DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached)
+                     .create();
+    }
+    bool pattern = false;
+    if (probe_rb) {
+      std::memset(probe_rb.getCpuAddr(), 0xAA, 4096 * 64);
+      upload_command_buffer_.clear();
+      upload_command_buffer_.addMemory(upload_command_memory_, 0, kUploadCommandSize);
+      upload_command_buffer_.barrier(DkBarrier_Full, DkInvalidateFlags_Image);
+      DkCopyBuf back{};
+      back.addr = probe_rb.getGpuAddr();
+      back.rowLength = 4096;
+      back.imageHeight = 64;
+      const DkImageRect read_rect{0, 0, 0, 64, 64, 1};
+      upload_command_buffer_.copyImageToBuffer(probe_dst, read_rect, back, 0);
+      const DkCmdList rb_list = upload_command_buffer_.finishList();
+      {
+        std::lock_guard lock(device_.submit_mutex());
+        device_.queue().submitCommands(rb_list);
+        device_.queue().flush();
+      }
+      NoteGpuSubmit();
+      BoundedQueueWaitIdle(device_.queue(), "readback", 2000);
+      auto* rb = static_cast<uint8_t*>(probe_rb.getCpuAddr());
+      pattern = rb[0] == 0x5A && rb[1] == 0x5A;
+      REXGPU_WARN("[upload-sync] probe #{} {}x{} deko{}: readback first bytes "
+                  "[{:02X}{:02X}{:02X}{:02X} {:02X}{:02X}{:02X}{:02X}]",
+                  sync_probes, width, height, uint32_t(deko_texture.format()), rb[0], rb[1],
+                  rb[2], rb[3], rb[4], rb[5], rb[6], rb[7]);
+    }
+    REXGPU_WARN("[upload-sync] probe #{} {}x{} deko{}: verdict {} (fence={}, queue error=no)",
+                sync_probes, width, height, uint32_t(deko_texture.format()),
+                pattern ? "PASS - copy legal on this image"
+                        : "FAIL - copy ran but the pattern did not land",
+                fence_ok);
+    rex::NoteHostAction("upload-sync probe #%u %s %ux%u deko%u", sync_probes,
+                        pattern ? "PASS" : "FAIL", width, height,
+                        uint32_t(deko_texture.format()));
+    // The copy executed synchronously: bindable under the delay rule now.
+    deko_texture.set_upload_cohort(FrameSubmitEpoch());
+    return true;
   }
 
   // Run-066: record into the FRAME's command list when the command processor can
