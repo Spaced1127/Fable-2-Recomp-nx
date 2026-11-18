@@ -11,6 +11,12 @@ F5 HARDWARE - the packaged build boots and renders on the real Switch.
 
 ## Status line (keep current)
 
+**MODE 2026-11-18: BATCHED-CHANGE - user unavailable for hardware runs.** No
+device requests. Current package: batch-078 (prologue list + overflow cap +
+static asserts + late mirror re-read), host-verified (compile/static/written
+argument), device verification pending. Procedure: docs/RUN_PLAN.md; parked
+threads + experiments: docs/PARKED.md.
+
 **F1 OPEN** (copy PROVEN executing (068); guest-output surface PROVEN static white (069) -
 the guest draws 1 static frame, never menu content; fault is upstream of the presenter.
 Depth-format upload skip + staging cohorts in run-070 pending)

@@ -2,6 +2,14 @@
 title/menu, F4 input, F5 hardware; status line kept current there. The autonomy
 contract and discipline in it govern every session.
 
+**MODE (2026-11-18): BATCHED-CHANGE - no hardware runs available.** Do not ask
+for device runs. The current package is **batch-078** (prologue list + overflow
+cap + static asserts + late mirror re-read); everything verifiable without a
+device is done (compile, static_asserts, written argument). Run procedure,
+log-line->question map and on-screen checklist: **[RUN_PLAN.md](RUN_PLAN.md)**.
+Parked threads with confidence + single confirming experiment:
+**[PARKED.md](PARKED.md)**.
+
 # HANDOFF TO FRESH SESSION - 2026-11-18
 
 ## What this is
@@ -108,21 +116,16 @@ powershell -ExecutionPolicy Bypass -File H:\Projects\Fable2Port\Fable-2-Recomp-n
 (Get-FileHash "H:\Projects\Fable2Port\stage\switch\Fable II\fable_2.nro" -Algorithm SHA256).Hash
 ```
 
-The staged package is `H:\Projects\Fable2Port\stage\switch\Fable II`
-(`fable_2.nro`, `fable_2.toml`, `fable2_config.toml`; run-077 NRO hash in
-`docs/RUN_077.md`). The user copies the three files to `E:\switch\Fable II`,
-launches full-memory, **lets it run 3+ minutes**, and returns the **whole
-`logs/` folder as-is INCLUDING `logs/rex/`** (never renamed) + a photo. Read:
-- `[upload-prologue] N copies submitted ... before frame submit #K` - the
-  prologue is riding ahead of the draw list;
-- `[gpu-error]` - must be GONE for 60 s (1800+ presents); if present, the
-  correlation dump names the inherited state (last prologue/frame/bind);
-- `[guest-readback] #30/#150` - fnv1a differs = guest animating (F1);
-- `[upload-src] guest mirror base_page=... N non-zero of 4096` - MIRROR EMPTY
-  = the M3 source-data thread (guest texture writes not reaching the mirror);
-  pursue it once survival is proven, one thread at a time.
-Acceptance: no queue error 60 s + fnv1a differs + screen not white (geometry
-may appear even with empty textures).
+**BATCHED-CHANGE mode: no hardware requests.** The staged package is
+`H:\Projects\Fable2Port\stage\switch\Fable II` (batch-078; hash in RUN_PLAN.md
+/ git log). WHEN the user returns, the full procedure - what to run, what to
+send back (whole logs/ unrenamed incl. logs/rex/), the log-line->question map
+and the on-screen checklist - is in **[RUN_PLAN.md](RUN_PLAN.md)**. Acceptance:
+no `[gpu-error]` for 60 s + guest-readback fnv1a differs + screen not white.
+Parked threads (mirror source-data, UV scale, depth resolve, VM-nil, format
+correctness) with their single confirming experiments: **[PARKED.md](PARKED.md)**.
+Host-side work continues meanwhile; new device-only faults are noted, not
+speculated in code.
 
 ## Evidence
 
@@ -217,11 +220,16 @@ the 2026-11-15 quiet-mode order in every respect.
 Last hardware run: **076** (2026-11-18, **2x2 A=B=C=D=PASS: copies/staging/
 images/flags all innocent - the FRAME CONTEXT faults the channel**; second
 finding: guest mirror pages EMPTY CPU-side = separate M3 source-data fault;
-074/075 zero verdicts corrected as probe artefacts). Next: run-077 (**uploads
-moved to a copy-only PROLOGUE list submitted+kicked before the draw list - no
-RT/texture binds; [upload-src] logs the guest mirror pages; delay/cohorts/
-depth-skip/alignment kept; deko3d_upload_prologue=false for A/B**) - built and
-staged, NRO hash in `docs/RUN_077.md`, tag `m1-f1-077`, unverified.
+074/075 zero verdicts corrected as probe artefacts). Run-077 (prologue list)
+was built/staged but NOT run - user unavailable, mode changed to BATCHED-CHANGE.
+
+Current package: **batch-078** (`m1-batch-078`) - prologue list + mid-frame
+overflow cap (128 copies, static-asserted fit) + toolchain static_asserts
+(0x800/0x9/0x28/barrier4/mask0x15) + late mirror re-read at present >= 160
+(the parked source-data thread's single experiment). Verified without a device:
+compiles clean, static asserts, written correctness argument against run-076
+(RUN_PLAN.md). Device verification PENDING - no hardware requested. Procedure
+when the user returns: RUN_PLAN.md; parked threads: PARKED.md.
 
 **Run-067 result, in one line:** the copy-only bisect logged `copy fence TIMEOUT
 after up to 1000 ms` for the tiled destination (flags 0x800, size 2949120, align

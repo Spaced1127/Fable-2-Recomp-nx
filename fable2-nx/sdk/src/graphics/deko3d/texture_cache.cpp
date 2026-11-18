@@ -193,6 +193,26 @@ namespace rex::graphics::deko3d {
 namespace {
 
 constexpr uint32_t kUploadCommandSize = 64 << 10;
+// Run-078: max copies per prologue list before a mid-frame submit+reopen.
+// Each copyBufferToImage + Full barrier is well under 512 bytes of commands;
+// 128 * 512 = 64 KB = the whole block, so the cap is conservative by construction.
+constexpr uint32_t kPrologueCopyCap = 128;
+static_assert(kPrologueCopyCap * 512 <= kUploadCommandSize,
+              "prologue cap must fit the command block with margin");
+
+// Run-078: toolchain-drift guards. Every logged flags/extent value in the
+// run-076 matrix and the run-077 prologue assumes these deko3d constants; if a
+// toolchain update changes them, the build stops here instead of silently
+// invalidating the recorded evidence.
+static_assert(DkImageFlags_Usage2DEngine == 0x800, "deko3d Usage2DEngine flag changed");
+static_assert((DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached) == 0x9,
+              "staging memblock flags changed (matrix cells assumed 0x9)");
+static_assert((DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image) == 0x28,
+              "image memblock flags changed (matrix cells assumed 0x28)");
+static_assert(DkBarrier_Full == 4, "deko3d barrier enum changed");
+static_assert((DkInvalidateFlags_Image | DkInvalidateFlags_Descriptors |
+               DkInvalidateFlags_L2Cache) == 0x15,
+              "invalidate mask changed (prologue logs 0x15)");
 
 // Run-069: the frame-path upload probe. The readback rides the FIRST frame-list
 // upload (recorded after its copy, same list), and the PRESENTER polls it every
@@ -208,12 +228,44 @@ struct FrameProbe {
 };
 FrameProbe g_frame_probe;
 
+// Run-078: the parked mirror thread's single experiment. Run-076 found the
+// guest mirror pages EMPTY at upload time. This re-reads the same pages late
+// (present >= 160, after the upload batch): non-zero now = the data arrives
+// LATE (the fix is re-upload/write-watching); still zero = the data never
+// reaches this alias (address/aliasing investigation). Passive read only.
+struct LateSrcCheck {
+  const uint8_t* ptr;
+  uint32_t base_page;
+  uint32_t nz_upload;
+  uint32_t w, h, fmt;
+};
+LateSrcCheck g_late_src[8];
+uint32_t g_late_src_count = 0;
+bool g_late_src_done = false;
+
 }  // namespace
 
 // Called by the presenter on every present: prints the frame-path upload's
 // readback once two presents have passed the frame that carried it (the queue
 // is in-order and the present kick has executed it by then). Non-blocking.
 void PollFrameUploadProbe() {
+  // Run-078: late mirror re-read (the parked source-data thread's experiment).
+  if (!g_late_src_done && g_late_src_count && PresentEpoch() >= 160) {
+    g_late_src_done = true;
+    for (uint32_t i = 0; i < g_late_src_count; ++i) {
+      const LateSrcCheck& s = g_late_src[i];
+      uint32_t nz = 0;
+      for (uint32_t j = 0; j < 4096; ++j) {
+        if (s.ptr[j]) ++nz;
+      }
+      REXGPU_WARN("[upload-src-late] upload #{} base_page={} {}x{} deko{}: non-zero of first "
+                  "4096 now {} (was {} at upload) -> {}",
+                  i + 1, s.base_page, s.w, s.h, s.fmt, nz, s.nz_upload,
+                  nz ? "DATA ARRIVED LATE - re-upload/write-watching is the fix"
+                     : "STILL EMPTY - guest data never reaches this alias");
+      rex::NoteHostAction("upload-src-late #%u nz=%u (was %u)", i + 1, nz, s.nz_upload);
+    }
+  }
   if (!g_frame_probe.armed || g_frame_probe.done || !g_frame_probe.block) {
     return;
   }
@@ -1725,6 +1777,10 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
                 uint32_t(key.base_page), fmt::ptr(source), source[0], source[1], source[2],
                 source[3], source[4], source[5], source[6], source[7], nz,
                 nz ? "" : " - MIRROR EMPTY: guest texture data has not reached shared memory");
+    if (g_late_src_count < 8) {
+      g_late_src[g_late_src_count++] = {source, uint32_t(key.base_page), nz, width, height,
+                                        uint32_t(deko_texture.format())};
+    }
   }
   uint8_t* destination = static_cast<uint8_t*>((*staging).getCpuAddr());
   // Zero first so the pitch padding between rows is defined; the copy reads the
@@ -1928,6 +1984,14 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
   const bool use_prologue = REXCVAR_GET(deko3d_upload_prologue);
   dk::CmdBuf* frame_cmdbuf = nullptr;
   if (use_prologue) {
+    // Run-078: command-memory safety. deko3d's cmdbuf does not bounds-check;
+    // kUploadCommandSize (64 KB) holds a few hundred copies+barriers, but a
+    // heavy load frame must not overflow it. At the cap, submit the accumulated
+    // copy-only list (the same safe shape as the swap-time submit) and open a
+    // fresh one mid-frame.
+    if (prologue_open_ && prologue_copies_ >= kPrologueCopyCap) {
+      SubmitUploadPrologue();
+    }
     if (!prologue_open_) {
       upload_command_buffer_.clear();
       upload_command_buffer_.addMemory(upload_command_memory_, 0, kUploadCommandSize);
