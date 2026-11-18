@@ -88,21 +88,17 @@ powershell -ExecutionPolicy Bypass -File H:\Projects\Fable2Port\Fable-2-Recomp-n
 ```
 
 The staged package is `H:\Projects\Fable2Port\stage\switch\Fable II`
-(`fable_2.nro`, `fable_2.toml`, `fable2_config.toml`; run-074 NRO hash in
-`docs/RUN_074.md`). The user copies the three files to `E:\switch\Fable II`,
-launches full-memory, lets it run 3+ minutes if it survives, and returns the
-**whole `logs/` folder as-is INCLUDING `logs/rex/`** (never renamed) + a photo.
-Read the `[upload-sync] probe #N` lines (first upload batch, ~8.4 s):
-- **FAIL-WEDGED on a shape** -> that copy/image is illegal; the table above the
-  verdict has the values (flags/layout-size/align/extent/height%8). Fix the
-  image creation or copy descriptor for that shape (GOB-align the rect/layout,
-  or convert RGB10A2). Suspects: 240x180 RGB10A2 (height 180 %8 = 4).
-- **All PASS but the frame still faults** -> copies legal in isolation; the
-  fault is the frame context; next dump the first sampling draw's full
-  DkImageDescriptor/DkSampler.
-- **All PASS + 60 s survival** -> synchronous order was the fix; run-075
-  restores the frame-list path with proven shapes + re-enables guest readback.
-The `[tex-image] SETUP-TEST` line is the proven-good reference for the table.
+(`fable_2.nro`, `fable_2.toml`, `fable2_config.toml`; run-075 NRO hash in
+`docs/RUN_075.md`). The user copies the three files to `E:\switch\Fable II`,
+launches full-memory, **lets it run 3+ minutes**, and returns the **whole
+`logs/` folder as-is INCLUDING `logs/rex/`** (never renamed) + a photo. Read:
+- `[upload-sync] probe #N logical WxH -> aligned AWxAH ... verdict` - expect
+  **PASS [5A5A5A5A]** for 480x360->512x360 and 240x180->256x184;
+- `[gpu-error]` - must be GONE at every present;
+- survival past 60 s (1800+ presents) or the next named fault + correlation;
+- `[guest-readback] #30/#150` - fnv1a differs = the guest animating (F1).
+If the aligned probes PASS but a later fault appears: the correlation dump
+names the image; M3 UV-scale (logical/aligned) is the known sampling caveat.
 
 ## Evidence
 
@@ -194,14 +190,13 @@ the 2026-11-15 quiet-mode order in every respect.
 - Persist this for every future session; it replaces the quiet-mode section that
   used to live here.
 
-Last hardware run: **073** (2026-11-18, barrier + one-frame delay in, fault
-UNCHANGED at the upload frame's kick with no sampling - **the copy command
-itself faults**; flags audit: all tex-cache images have Usage2DEngine 0x800;
-suspects now RGB10A2 format and height 180 %8 != 0). Next: run-074 (**decisive
-copies-only probe: first 4 uploads submit ONLY the copy + waitIdle + readback,
-PASS/FAIL per shape with the full flags/extent table vs the setup-test image;
-guest-readback gated off**) - built and staged, NRO hash in `docs/RUN_074.md`,
-tag `m1-f1-074`, unverified.
+Last hardware run: **074** (2026-11-18, **FOUND IT: destination WIDTH%64 is
+the discriminator** - 960 PASS, 480/240 FAIL zero bytes; height%8 ruled out;
+unaligned copies fault the channel in-frame = the ~9.4 s death). Next:
+run-075 (**ALIGNMENT FIX: upload images allocated w64/h8, copy rect + staging
+rows aligned, logical size kept for descriptor/UVs; copies-only probe re-runs
+first; guest-readback re-enabled**) - built and staged, NRO hash in
+`docs/RUN_075.md`, tag `m1-f1-075`, unverified.
 
 **Run-067 result, in one line:** the copy-only bisect logged `copy fence TIMEOUT
 after up to 1000 ms` for the tiled destination (flags 0x800, size 2949120, align
@@ -338,6 +333,7 @@ Does not work yet:
 | 071 | D55CA595 | **No GPU error, NO hook fired, death FIXED ~9.3 s regardless of uploads.** death-watch 32/64/96/128/160 all `gpu error state=no`; no rex_exit_marker entry, no new crash block, no terminate/abort. Uploads start ~8.4 s because the guest streams GUI assets then - a SYMPTOM of the guest progress point, not the cause. rex_actions dominated by legal EOF short reads (`st=0`, got<req). Host-side: file layer returns SUCCESS+real count for short reads (END_OF_FILE only on true failure); NtReadFile writes iosb.status/info, queues APC, returns PENDING for async - chain looks correct, guest-visible logging added in 072. Static audit: every known exit site logs first (ERROR/INFO+flush) and none appeared; xmemory _Exit(4) needs 2000 heap failures (none); TerminateTitle only ends guest threads. So: a path bypassing ALL logging (direct svcExitProcess/_exit) or an external OS kill. Run-072 wraps svcExitProcess/__libnx_exit/_exit/_Exit/exit/__assert_func with caller stacks, logs guest-visible short-read status, dumps last actions in death-watch, adds GPU error checks at frame submit + post-kick. |
 | 072 | 12F95CD1 | **GPU FAULT CONFIRMED at the upload frame's kick; short reads CLOSED.** Every short read: iosb.status=0x0, info=real count, returned=0x103 PENDING, APC queued - legal EOF, not the cause (stop re-testing). No exit hook fired. **`[gpu-error] queue in ERROR state right after present #157 kick`**; `[frame] submit #156 carried 3 upload copies` (480x360 RGBA8 + 2x240x180 RGB10A2); death-watch <=#128 all error=no - the error is BORN at that kick. The in-frame upload work faults the GPU asynchronously; OS kills ~9.4 s / 157 presents. Isolated setup copy worked because nothing sampled its destination in the same submit. Also found: depth-skipped textures were still created and BOUND (sampling ZF32_X24S8 as colour = fault candidate). Run-073: one-frame sampling delay (bind only after the copy's frame submitted/kicked), depth images never bind, Full barrier + Image\|Descriptors\|L2 invalidate (no DkBarrier_2DTo3D exists in this deko3d - Full is strongest), probe off, frame/image correlation dump at the witness, short-read flood removed. |
 | 073 | 1447E178 | **Barrier + delay in; fault UNCHANGED - the COPY ITSELF faults.** `barrier after copy: DkBarrier_Full(4) invalidate=0x15`; one-frame delay active; `[gpu-error] right after present #158 kick`; frame #157 carried 3 copies and NO draw sampled the new images (delay) - so not read-while-write, not a missing barrier. **Flags audit from [tex-image]: every tex-cache image HAS flags=0x800** (missing-flag hypothesis disproved): 480x360 RGBA8 layout 737280 align 512; 240x180 RGB10A2 layout 245760 (PADDED) align 512; depth 960x720 layout 5898240 align 65536 (skipped/never bound). Remaining differences vs the proven setup copy: RGB10A2 format (untested) and **height 180 %8 = 4** (block-linear GOB height; every proven-good copy had height%8=0). Run-074: copies-only probe per shape (submit ONLY the copy + waitIdle + readback, PASS/FAIL + full flags/extent table), setup-test reference params logged, guest-readback gated off. |
+| 074 | 404D5845 | **FOUND IT: destination WIDTH%64 is the discriminator.** Copies-only probes (flags 0x800, fence signalled, error=no): 960x720 (w%64=0) PASS [5A5A5A5A]; 480x360 (w%64=32, h%8=0) FAIL [00000000]; 240x180 RGB10A2 (w%64=48) FAIL [00000000]. Height is NOT it (480x360 h%8=0 fails). Unaligned-width copies land ZERO bytes in isolation and fault the channel in-frame - the ~9.4 s death. deko3d tiled-layout requirement for 2D-engine destinations. Run-075 fix: image layout at aligned w64/h8, copy rect + staging rows use the aligned extent (decode stays logical, memset zeroes padding), LOGICAL size kept for descriptor/UVs (UV scale logical/aligned = M3 caveat); probe re-runs first, guest-readback re-enabled. |
 
 ### Run-048 result: break located inside sub_8233EEE0
 

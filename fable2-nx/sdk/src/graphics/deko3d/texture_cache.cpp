@@ -106,11 +106,11 @@ REXCVAR_DEFINE_BOOL(deko3d_upload_sync_probe, true, "GPU/deko3d",
                     "the full image flags/extent table. Names the illegal copy/image (run-074).")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
-// Run-074: one question per run - the guest-output readback is gated off while
-// the copies-only probe runs (its #150 submit lands near the upload batch).
-REXCVAR_DEFINE_BOOL(deko3d_guest_readback, false, "GPU/deko3d",
-                    "Guest-output image readback at present 30/150. Off for run-074 (one "
-                    "question per run); re-enable for F1 content work once the fault is fixed.")
+// Run-075: re-enabled - with the alignment fix the upload batch should survive,
+// and the readback is the F1 evidence (does the guest output start animating).
+REXCVAR_DEFINE_BOOL(deko3d_guest_readback, true, "GPU/deko3d",
+                    "Guest-output image readback at present 30/150 (fnv1a + grid + blank/content "
+                    "verdict). Re-enabled run-075 for F1 evidence once the alignment fix lands.")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 // Run-068: descriptors B (imageHeight = total bytes - the run-060 OS-kill DMA if
@@ -331,17 +331,27 @@ class Deko3DTextureCache::TextureImpl final : public Texture {
 
   bool Initialize(DkImageFormat format, DkImageType type, uint32_t width, uint32_t height,
                   uint32_t depth) {
-    width_ = width;
+    width_ = width;    // LOGICAL size - kept for the texture descriptor / UVs
     height_ = height;
     depth_ = depth;
     format_ = format;
     image_type_ = type;
 
+    // Run-075: run-074's copies-only probe proved the discriminator is the
+    // destination WIDTH alignment: 960 (%64=0) PASS, 480 (%64=32) and 240
+    // (%64=48) FAIL with zero bytes landed (and an in-frame channel fault).
+    // The 2D engine's tiled destination needs width aligned to 64 pixels;
+    // height is aligned to 8 (GOB height) for safety. The IMAGE and the copy
+    // rect use the aligned extent; sampling keeps the logical size (the UV
+    // scale logical/aligned is an M3 shader concern, noted in RUN_075.md).
+    aligned_width_ = type == DkImageType_2D ? (width + 63) & ~uint32_t(63) : width;
+    aligned_height_ = type == DkImageType_2D ? (height + 7) & ~uint32_t(7) : height;
+
     dk::ImageLayoutMaker maker{texture_cache_.device_.device()};
     maker.setFlags(DkImageFlags_Usage2DEngine)
         .setType(type)
         .setFormat(format)
-        .setDimensions(width, height, depth)
+        .setDimensions(aligned_width_, aligned_height_, depth)
         .setMipLevels(1);
     maker.initialize(layout_);
     const uint64_t size = layout_.getSize();
@@ -364,11 +374,11 @@ class Deko3DTextureCache::TextureImpl final : public Texture {
     static uint32_t logged_creations = 0;
     if (logged_creations < 12) {
       ++logged_creations;
-      REXGPU_WARN("[tex-image] created {}x{}x{} fmt={} type={} flags=0x{:X} layout-size={} "
-                  "align={} mem={} gpu=0x{:X}",
-                  width, height, depth, uint32_t(format), uint32_t(type),
-                  uint32_t(DkImageFlags_Usage2DEngine), size, alignment, uint32_t(aligned),
-                  uint64_t(image_.getGpuAddr()));
+      REXGPU_WARN("[tex-image] created {}x{}x{} (logical) -> {}x{} (aligned w64/h8) fmt={} "
+                  "type={} flags=0x{:X} layout-size={} align={} mem={} gpu=0x{:X}",
+                  width, height, depth, aligned_width_, aligned_height_, uint32_t(format),
+                  uint32_t(type), uint32_t(DkImageFlags_Usage2DEngine), size, alignment,
+                  uint32_t(aligned), uint64_t(image_.getGpuAddr()));
     }
     return true;
   }
@@ -381,6 +391,8 @@ class Deko3DTextureCache::TextureImpl final : public Texture {
   void set_upload_cohort(uint64_t cohort) { upload_cohort_ = cohort; }
   uint64_t layout_size() const { return layout_.getSize(); }
   uint32_t layout_align() const { return layout_.getAlignment(); }
+  uint32_t aligned_width() const { return aligned_width_; }
+  uint32_t aligned_height() const { return aligned_height_; }
 
   dk::Image& image() { return image_; }
   DkImageFormat format() const { return format_; }
@@ -400,6 +412,8 @@ class Deko3DTextureCache::TextureImpl final : public Texture {
   uint32_t width_ = 0;
   uint32_t height_ = 0;
   uint32_t depth_ = 1;
+  uint32_t aligned_width_ = 0;   // run-075: image/copy extent (w64/h8)
+  uint32_t aligned_height_ = 0;
   uint64_t upload_cohort_ = 0;  // run-073: see set_upload_cohort
 };
 
@@ -1417,15 +1431,22 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
     return true;
   }
 
-  // Source row pitch for the copy. A 3840-byte row (960 px of RGBA8) wedged the
-  // 2D engine permanently, while the presenter's 5120-byte swapchain rows have
-  // been copied for thousands of frames without trouble, so the pitch is the
-  // one known-bad difference. Pad to a 4096-byte multiple - a multiple of every
-  // plausible tile and pitch granularity - and zero the padding.
+  // Run-075: the copy's destination extent is the ALIGNED image (width%64=0,
+  // height%8=0 - run-074's discriminator). The staging rows must cover the
+  // aligned width and the aligned row count; the guest data fills the logical
+  // rows/width and the memset below zeroes the padding tail and extra rows.
+  const uint32_t aligned_w = deko_texture.aligned_width();
+  const uint32_t aligned_h = deko_texture.aligned_height();
+  const uint32_t aligned_blocks_wide =
+      (aligned_w + format_info->block_width - 1) / format_info->block_width;
+  const uint32_t aligned_blocks_high =
+      (aligned_h + format_info->block_height - 1) / format_info->block_height;
+  const uint32_t aligned_row_bytes = aligned_blocks_wide * bytes_per_block;
+  // Source row pitch: pad to a 4096-byte multiple (the proven-good pitch).
   constexpr uint32_t kSourcePitchAlignment = 4096;
   const uint32_t source_pitch =
-      (row_bytes + kSourcePitchAlignment - 1) & ~(kSourcePitchAlignment - 1);
-  const uint32_t staging_bytes = source_pitch * blocks_high;
+      (aligned_row_bytes + kSourcePitchAlignment - 1) & ~(kSourcePitchAlignment - 1);
+  const uint32_t staging_bytes = source_pitch * aligned_blocks_high;
 
   const xenos::TextureFormat base_format = GetBaseFormat(key.format);
   const bool block_compressed = base_format == xenos::TextureFormat::k_DXT1 ||
@@ -1540,27 +1561,27 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
   if (REXCVAR_GET(deko3d_upload_sync_probe) && sync_probes < 4 &&
       !device_.queue().isInErrorState()) {
     ++sync_probes;
-    const uint64_t src_extent = uint64_t(source_pitch) * blocks_high;
-    REXGPU_WARN("[upload-sync] probe #{} {}x{} xenos{}->deko{}: image flags=0x{:X} "
-                "layout-size={} align={} gpu=0x{:X} offset=0 mem={} | rect={}x{} "
-                "(height%8={} width%64={}) | src rowLength={} imageHeight={} extent={} "
-                "staging={} | layout>=rect-bytes: {} | COPY-ONLY, no draws",
-                sync_probes, width, height, uint32_t(key.format),
+    const uint64_t src_extent = uint64_t(source_pitch) * aligned_blocks_high;
+    REXGPU_WARN("[upload-sync] probe #{} logical {}x{} -> aligned {}x{} xenos{}->deko{}: "
+                "image flags=0x{:X} layout-size={} align={} gpu=0x{:X} offset=0 mem={} | "
+                "rect={}x{} (height%8={} width%64={}) | src rowLength={} imageHeight={} "
+                "extent={} staging={} | layout>=rect-bytes: {} | COPY-ONLY, no draws",
+                sync_probes, width, height, aligned_w, aligned_h, uint32_t(key.format),
                 uint32_t(deko_texture.format()), uint32_t(DkImageFlags_Usage2DEngine),
                 deko_texture.layout_size(), deko_texture.layout_align(),
                 uint64_t(deko_texture.image().getGpuAddr()), deko_texture.layout_size(),
-                width, height, height % 8, width % 64, source_pitch, blocks_high,
-                src_extent, staging_size,
-                deko_texture.layout_size() >= uint64_t(width) * height * 4 ? "yes" : "NO");
+                aligned_w, aligned_h, aligned_h % 8, aligned_w % 64, source_pitch,
+                aligned_blocks_high, src_extent, staging_size,
+                deko_texture.layout_size() >= uint64_t(aligned_w) * aligned_h * 4 ? "yes" : "NO");
     upload_command_buffer_.clear();
     upload_command_buffer_.addMemory(upload_command_memory_, 0, kUploadCommandSize);
     DkCopyBuf probe_src{};
     probe_src.addr = (*staging).getGpuAddr();
     probe_src.rowLength = source_pitch;
-    probe_src.imageHeight = blocks_high;
+    probe_src.imageHeight = aligned_blocks_high;
     dk::ImageView probe_dst{deko_texture.image()};
     probe_dst.setMipLevels(0, 1);
-    const DkImageRect probe_rect{0, 0, 0, width, height, 1};
+    const DkImageRect probe_rect{0, 0, 0, aligned_w, aligned_h, 1};
     upload_command_buffer_.copyBufferToImage(probe_src, probe_dst, probe_rect);
     upload_command_buffer_.barrier(DkBarrier_Full, DkInvalidateFlags_Image |
                                                        DkInvalidateFlags_Descriptors |
@@ -1649,10 +1670,10 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
     DkCopyBuf to_image{};
     to_image.addr = (*staging).getGpuAddr();
     to_image.rowLength = source_pitch;
-    to_image.imageHeight = blocks_high;
+    to_image.imageHeight = aligned_blocks_high;
     dk::ImageView destination_view{deko_texture.image()};
     destination_view.setMipLevels(0, 1);
-    const DkImageRect destination_rect{0, 0, 0, width, height, 1};
+    const DkImageRect destination_rect{0, 0, 0, aligned_w, aligned_h, 1};
     frame_cmdbuf->copyBufferToImage(to_image, destination_view, destination_rect);
     // Run-073: this deko3d has no DkBarrier_2DTo3D - the enum is None/Tiles/
     // Fragments/Primitives/Full, and Full "completes the processing of all
@@ -1675,11 +1696,12 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
     static uint32_t frame_recorded = 0;
     ++frame_recorded;
     rex::NoteHostAction("upload #%u recorded into FRAME list (rowLength=%u imageHeight=%u)",
-                        frame_recorded, source_pitch, blocks_high);
+                        frame_recorded, source_pitch, aligned_blocks_high);
     if (frame_recorded <= 8 || (frame_recorded % 128) == 0) {
-      REXGPU_WARN("[upload] #{} {}x{} recorded into the FRAME list (copy executes with the frame, "
-                  "rowLength {} bytes, imageHeight {} rows)",
-                  frame_recorded, width, height, source_pitch, blocks_high);
+      REXGPU_WARN("[upload] #{} {}x{} (aligned {}x{}) recorded into the FRAME list (copy executes "
+                  "with the frame, rowLength {} bytes, imageHeight {} rows)",
+                  frame_recorded, width, height, aligned_w, aligned_h, source_pitch,
+                  aligned_blocks_high);
     }
     // Run-070: staging lifetime pinned to the frame the copy RIDES, not to the
     // present epoch at pin time. Cohort = the next frame submit; release only
@@ -1764,10 +1786,10 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
   // started executing (runs 042-048 only looked healthier because the upload was
   // skipped after its fence "timed out").
   source_buffer.rowLength = source_pitch;
-  source_buffer.imageHeight = blocks_high;
+  source_buffer.imageHeight = aligned_blocks_high;
   dk::ImageView destination_view{deko_texture.image()};
   destination_view.setMipLevels(0, 1);
-  const DkImageRect destination_rect{0, 0, 0, width, height, 1};
+  const DkImageRect destination_rect{0, 0, 0, aligned_w, aligned_h, 1};
   upload_command_buffer_.copyBufferToImage(source_buffer, destination_view, destination_rect);
   // Drop the GPU's cached image data afterwards: the draws that sample this
   // texture are recorded into a different list, so queue order alone does not

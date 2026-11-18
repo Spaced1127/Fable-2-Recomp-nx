@@ -14,12 +14,12 @@ F5 HARDWARE - the packaged build boots and renders on the real Switch.
 **F1 OPEN** (copy PROVEN executing (068); guest-output surface PROVEN static white (069) -
 the guest draws 1 static frame, never menu content; fault is upstream of the presenter.
 Depth-format upload skip + staging cohorts in run-070 pending)
-| **F2 OPEN** (run-073: barrier + one-frame delay did NOT clear the fault - the COPY ITSELF
-faults the channel; all tex-cache images have Usage2DEngine 0x800; suspects: RGB10A2 format and
-height 180 %8 != 0 (GOB alignment); run-074: copies-only probe per shape with flags/extent table)
+| **F2 FIX STAGED** (run-074 FOUND IT: destination WIDTH%64 is the discriminator - 960 PASS,
+480/240 FAIL zero bytes / in-frame channel fault; run-075: images allocated w64/h8, copy rect +
+staging aligned, logical size kept for UVs; acceptance = probe PASS + no gpu-error + 60 s survival)
 | **F3 OPEN** (guest stuck in boot/static-screen state; VM-nil crash ~50 s when survival allows)
 | **F4 OPEN** (guest input works; menu not yet visible)
-| **F5 PARTIAL** (packages boot on real Switch, screen static white) - last hardware run: 073.
+| **F5 PARTIAL** (packages boot on real Switch, screen static white) - last hardware run: 074.
 
 ## Autonomy contract (user-set)
 
