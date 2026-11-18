@@ -13,12 +13,14 @@
  */
 
 #include <array>
+#include <chrono>
 #include <cstring>
 #include <mutex>
 
 #include <switch.h>
 #include <deko3d.hpp>
 
+#include <rex/graphics/deko3d/fence_wait.h>  // NoteGpuSubmit (run-060 age retirement)
 #include <rex/logging.h>
 #include <rex/ui/deko3d/deko3d_device.h>
 #include <rex/ui/deko3d/deko3d_presenter.h>
@@ -30,6 +32,8 @@ namespace {
 
 constexpr unsigned kNumFramebuffers = 3;
 constexpr uint32_t kCmdSize = 0x1000;
+// Present-copy command slots (age-based retirement; see PaintAndPresentImpl).
+constexpr uint32_t kPresentCmdSlots = 16;
 
 }  // namespace
 
@@ -48,7 +52,6 @@ struct Deko3DPresenter::Impl {
   std::array<DkCmdList, kNumFramebuffers> bind_cmdlists{};
   std::array<DkCmdList, kNumFramebuffers> guest_copy_cmdlists{};
   DkCmdList pattern_cmdlist{};
-  dk::Fence copy_fence{};
   bool copy_pending = false;
   bool connected = false;
   uint32_t width = 0;
@@ -64,6 +67,20 @@ struct Deko3DPresenter::Impl {
   uint32_t guest_target_height = 0;
   bool has_guest_target = false;
   DkFence* render_fence = nullptr;
+  // Run-059 per-present telemetry: how far the swapchain is behind the guest.
+  uint32_t present_count = 0;
+  uint32_t present_cmd_slot = 0;
+  // Run-062: a fence signalled on the render queue after a present copy, polled
+  // (never waited) so the log answers "does a fence here ever signal?" on the
+  // queue that demonstrably executes. Run 061 only ever asked at boot, where a
+  // queue that had never run anything could not answer.
+  dk::Fence present_fence{};
+  uint32_t present_fence_at = 0;
+  uint32_t present_fence_result = 0;  // 0 = pending, 1 = signalled, 2 = never
+  uint32_t present_fence_delay = 0;
+  uint32_t refresh_epoch = 0;
+  uint32_t present_at_last_refresh = 0;
+  std::chrono::steady_clock::time_point last_refresh{};
 
   void ResetLocked() {
     if (device) {
@@ -80,8 +97,7 @@ struct Deko3DPresenter::Impl {
     gpu_cmd_mem = nullptr;
     upload_mem = nullptr;
     connected = false;
-    copy_pending = false;
-    width = height = 0;
+      width = height = 0;
     guest_pixels = nullptr;
     guest_width = guest_height = guest_pitch = 0;
     guest_gpu_pixels = 0;
@@ -134,7 +150,7 @@ struct Deko3DPresenter::Impl {
       REXLOG_ERROR("[deko3d] command buffer creation failed");
       return false;
     }
-    gpu_cmd_mem = dk::MemBlockMaker{dk_device, kCmdSize * kNumFramebuffers}
+    gpu_cmd_mem = dk::MemBlockMaker{dk_device, kCmdSize * kPresentCmdSlots}
                       .setFlags(DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached)
                       .create();
     gpu_cmdbuf = dk::CmdBufMaker{dk_device}.create();
@@ -268,6 +284,9 @@ bool Deko3DPresenter::RefreshGuestOutputImpl(
   Deko3DGuestOutputRefreshContext context(is_8bpc_out_ref);
   const bool refreshed = refresher(context);
   if (refreshed) {
+    impl_->refresh_epoch++;
+    impl_->present_at_last_refresh = impl_->present_count;
+    impl_->last_refresh = std::chrono::steady_clock::now();
     if (context.has_target()) {
       impl_->guest_pixels = nullptr;
       impl_->guest_gpu_pixels = 0;
@@ -309,21 +328,66 @@ Presenter::PaintResult Deko3DPresenter::PaintAndPresentImpl(bool execute_ui_draw
   if (appletGetFocusState() != AppletFocusState_InFocus) {
     return PaintResult::kNotPresented;
   }
-  // The previous frame's copy must be finished before its command slot is
-  // reused. The fence signs after the copy and before the present, so a paused
-  // display (HOME, capture) does not hold this wait.
-  if (impl_->copy_pending) {
-    const DkResult copy_wait = impl_->copy_fence.wait(2000000000);
-    if (copy_wait == DkResult_Timeout) {
-      REXLOG_ERROR("[deko3d] present copy fence timed out (queue error state {})",
-                   impl_->device->queue().isInErrorState() ? 1 : 0);
-      impl_->copy_pending = false;
-      return PaintResult::kNotPresented;
+  // Run-059: no copy fence, no wait.
+  //
+  // Run 058's boot self-test settled the primitive: `fence-only` - a signal on an
+  // EMPTY command list - also times out, so dkFenceWait never observes a signal on
+  // this stack. The old 2 s wait here therefore never returned "signalled": it
+  // either held the frame for two seconds or (after the fix in run 054) presented
+  // anyway. Now the copy and the present are submitted back to back and the
+  // display is never gated on a fence; deko3d's swapchain acquire/present is what
+  // paces the frame, exactly as it does for the pattern.
+  //
+  // Frame pacing consequence, stated so it is not mistaken for a bug: without the
+  // wait the frame loop can outrun the display, and `acquireImage` blocks instead.
+  // Every present is logged below with its slot, source branch and the age of the
+  // guest image, so the log shows whether the swapchain follows each guest frame.
+  // Run-063: the present copy's fence DOES signal here (run 062 observed it one
+  // frame after submission), so the slot is now waited on - bounded at 250 ms and
+  // named, which is the exact answer rather than a policy. A timed-out wait is
+  // logged and the frame still presents (a lost signal must not freeze the
+  // display).
+  if (impl_->present_count > 0 && impl_->present_fence_result != 2) {
+    static rex::graphics::deko3d::FenceWaitStats present_wait_stats;
+    if (rex::graphics::deko3d::WaitFenceForRetirement(impl_->present_fence, "present copy",
+                                                      present_wait_stats)) {
+      rex::graphics::deko3d::NoteFramePresented();
+    } else {
+      // Falls through: presenting anyway is correct, the fence is only pacing.
     }
-    impl_->copy_pending = false;
+  }
+
+  // Poll the present fence from the previous frame: no wait, ever.
+  if (impl_->present_fence_result == 0 && impl_->present_count > 0) {
+    if (impl_->present_fence.wait(0) == DkResult_Success) {
+      rex::graphics::deko3d::NoteFramePresented();
+      impl_->present_fence_result = 1;
+      impl_->present_fence_delay = impl_->present_count - impl_->present_fence_at;
+      REXLOG_WARN("[present-fence] SIGNALLED on the render queue at present #{} ({} frame(s) "
+                  "after the copy was submitted) - fences work on this queue",
+                  impl_->present_count, impl_->present_fence_delay);
+    } else if (impl_->present_count - impl_->present_fence_at > 60 &&
+               impl_->present_fence_result == 0) {
+      impl_->present_fence_result = 2;
+      REXLOG_WARN("[present-fence] NOT signalled after {} presents on the render queue - the "
+                  "queue executes (frames advance) but dkFenceWait never observes it",
+                  impl_->present_count - impl_->present_fence_at);
+    }
   }
   std::lock_guard dev_lock(impl_->device->submit_mutex());
   dk::Queue queue = impl_->device->queue();
+  {
+    // Run-066: the submit sites compared. This one demonstrably executes; the
+    // texture cache's standalone site does not (run 065), which is why uploads now
+    // ride this frame list instead.
+    static bool logged_once = false;
+    if (!logged_once) {
+      logged_once = true;
+      REXLOG_WARN("[submit] present site=presenter queue=0x{:X} device=0x{:X} fence={}",
+                  uint64_t(queue), uint64_t(impl_->device->device()),
+                  static_cast<const void*>(&impl_->present_fence));
+    }
+  }
   const int slot = queue.acquireImage(impl_->swapchain);
   queue.submitCommands(impl_->bind_cmdlists[slot]);
   // The render-target clears are submitted on this same queue before the
@@ -338,6 +402,22 @@ Presenter::PaintResult Deko3DPresenter::PaintAndPresentImpl(bool execute_ui_draw
                               impl_->guest_height && impl_->guest_gpu_pitch;
   const bool has_guest_output = impl_->guest_pixels && impl_->guest_width &&
                                 impl_->guest_height && impl_->guest_pitch;
+  // Run 054: name the branch that feeds the swapchain. Branch 4 (pattern) means
+  // no guest output was ever attached and the screen can only be the pattern.
+  const uint32_t branch_log =
+      has_target ? 1u : has_gpu_output ? 2u : has_guest_output ? 3u : 4u;
+  {
+    static uint32_t last_branch = 0xFFFFFFFFu;
+    const uint32_t branch = branch_log;
+    if (branch != last_branch) {
+      last_branch = branch;
+      REXLOG_WARN("[present] branch={} target={}x{} gpu=0x{:016X} guest=0x{:016X} {}x{}",
+                  branch, impl_->guest_target_width, impl_->guest_target_height,
+                  uint64_t(impl_->guest_gpu_pixels),
+                  uint64_t(reinterpret_cast<uintptr_t>(impl_->guest_pixels)),
+                  impl_->guest_width, impl_->guest_height);
+    }
+  }
   if (has_target) {
     const uint32_t copy_width =
         impl_->guest_width < impl_->width ? impl_->guest_width : impl_->width;
@@ -351,7 +431,13 @@ Presenter::PaintResult Deko3DPresenter::PaintAndPresentImpl(bool execute_ui_draw
                   copy_height);
     }
     impl_->gpu_cmdbuf.clear();
-    impl_->gpu_cmdbuf.addMemory(impl_->gpu_cmd_mem, slot * kCmdSize, kCmdSize);
+    // Run-060: a rotating command slot, not the swapchain slot. With the fence
+    // gone the present loop can reach 25-30 Hz, so reusing three slots (keyed by
+    // swapchain image) risks rewriting a copy list the GPU is still reading -
+    // run 059 died ~9 s in with no guest violation, which is what that looks
+    // like. 16 slots at ~30 Hz retires a slot after ~0.5 s.
+    impl_->present_cmd_slot = (impl_->present_cmd_slot + 1) % kPresentCmdSlots;
+    impl_->gpu_cmdbuf.addMemory(impl_->gpu_cmd_mem, impl_->present_cmd_slot * kCmdSize, kCmdSize);
     impl_->gpu_cmdbuf.barrier(DkBarrier_Full, DkInvalidateFlags_Image);
     dk::Image src_image = impl_->guest_target_image;
     dk::ImageView src_view{src_image};
@@ -360,8 +446,9 @@ Presenter::PaintResult Deko3DPresenter::PaintAndPresentImpl(bool execute_ui_draw
     const DkImageRect dst_rect{0, 0, 0, copy_width, copy_height, 1};
     impl_->gpu_cmdbuf.copyImage(src_view, src_rect, dst_view, dst_rect, 0);
     queue.submitCommands(impl_->gpu_cmdbuf.finishList());
-    queue.signalFence(impl_->copy_fence, true);
-    impl_->copy_pending = true;
+    rex::graphics::deko3d::NoteGpuSubmit();
+    queue.signalFence(impl_->present_fence, true);
+    impl_->present_fence_at = impl_->present_count;
   } else if (has_gpu_output) {
     const uint32_t copy_width =
         impl_->guest_width < impl_->width ? impl_->guest_width : impl_->width;
@@ -379,7 +466,13 @@ Presenter::PaintResult Deko3DPresenter::PaintAndPresentImpl(bool execute_ui_draw
     // window buffer (the same failure SVR2011 fixed with three swapchain
     // images and a copy fence).
     impl_->gpu_cmdbuf.clear();
-    impl_->gpu_cmdbuf.addMemory(impl_->gpu_cmd_mem, slot * kCmdSize, kCmdSize);
+    // Run-060: a rotating command slot, not the swapchain slot. With the fence
+    // gone the present loop can reach 25-30 Hz, so reusing three slots (keyed by
+    // swapchain image) risks rewriting a copy list the GPU is still reading -
+    // run 059 died ~9 s in with no guest violation, which is what that looks
+    // like. 16 slots at ~30 Hz retires a slot after ~0.5 s.
+    impl_->present_cmd_slot = (impl_->present_cmd_slot + 1) % kPresentCmdSlots;
+    impl_->gpu_cmdbuf.addMemory(impl_->gpu_cmd_mem, impl_->present_cmd_slot * kCmdSize, kCmdSize);
     // deko3d has no image layouts; a full barrier orders the acquired
     // presentable image and the render-target writes before the 2D engine
     // reads, and invalidates the image cache (plume's copy path does the same).
@@ -392,8 +485,9 @@ Presenter::PaintResult Deko3DPresenter::PaintAndPresentImpl(bool execute_ui_draw
     const DkImageRect rect{0, 0, 0, copy_width, copy_height, 1};
     impl_->gpu_cmdbuf.copyBufferToImage(source, dst_view, rect);
     queue.submitCommands(impl_->gpu_cmdbuf.finishList());
-    queue.signalFence(impl_->copy_fence, true);
-    impl_->copy_pending = true;
+    rex::graphics::deko3d::NoteGpuSubmit();
+    queue.signalFence(impl_->present_fence, true);
+    impl_->present_fence_at = impl_->present_count;
     if (logged_gpu_copy) {
       // Only the first frame reaches this diagnostic (logged_gpu_copy is set
       // above); keep it so the log proves the copy list was submitted.
@@ -421,6 +515,24 @@ Presenter::PaintResult Deko3DPresenter::PaintAndPresentImpl(bool execute_ui_draw
     queue.submitCommands(impl_->pattern_cmdlist);
   }
 
+  {
+    // One line per presented frame. `age` counts presents since the guest output
+    // was last refreshed (0 = this frame carries a fresh guest image), so the log
+    // answers "does the display follow the guest?" directly: a run of age=0 with
+    // increasing guest_refresh means yes; a climbing age means the presenter is
+    // re-presenting a stale image.
+    ++impl_->present_count;
+    const auto now = std::chrono::steady_clock::now();
+    const int64_t since_ms =
+        impl_->refresh_epoch ? std::chrono::duration_cast<std::chrono::milliseconds>(
+                                   now - impl_->last_refresh)
+                                   .count()
+                             : -1;
+    const uint32_t age = impl_->present_count - impl_->present_at_last_refresh;
+    REXLOG_WARN("[present] #{} slot={} branch={} guest#{} age={} since_refresh={}ms {}x{}",
+                impl_->present_count, slot, branch_log, impl_->refresh_epoch, age, since_ms,
+                impl_->guest_width, impl_->guest_height);
+  }
   queue.presentImage(impl_->swapchain, slot);
   return PaintResult::kPresented;
 }

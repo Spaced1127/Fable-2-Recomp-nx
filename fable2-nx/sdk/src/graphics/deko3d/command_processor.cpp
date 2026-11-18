@@ -25,6 +25,7 @@
 #include <rex/graphics/deko3d/texture_cache.h>
 #include <rex/graphics/pipeline/texture/util.h>
 #include <rex/graphics/util/draw.h>
+#include <rex/cvar.h>
 #include <rex/logging.h>
 #include <rex/system/xmemory.h>
 #include <rex/ui/deko3d/deko3d_device.h>
@@ -35,6 +36,17 @@
 // The profiler's guest frame counter (switch_perf.cpp).
 extern "C" void RexSwitchPerfCount(unsigned id);
 #endif
+
+// Diagnostic switch for run 042: the app dies at the GUI texture load with no
+// SDK crash report and no guest violation, so the death is below the guest
+// layer. Skipping every draw isolates a GPU fault/queue hang in the draw path
+// from clears, copies and presents. Off by default; set deko3d_skip_draws = true
+// in fable_2.toml to run the isolation test.
+REXCVAR_DEFINE_BOOL(deko3d_skip_draws, false, "GPU/deko3d",
+                    "Diagnostic: skip every draw before it is recorded, to isolate a "
+                    "GPU fault or queue hang in the draw path. Clears, copies, resolves "
+                    "and presents still run.")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 namespace rex::graphics::deko3d {
 
@@ -92,6 +104,15 @@ DkPrimitive GetDkPrimitive(xenos::PrimitiveType type, bool& supported_out) {
       return DkPrimitive_LineStrip;
     case xenos::PrimitiveType::kLineLoop:
       return DkPrimitive_LineLoop;
+    // Run-063: host primitive 8 is kRectangleList (xenos.h: kRectangleList =
+    // 0x08), NOT a quad strip - kQuadList is 0x0D and was already mapped.
+    // A rectangle list supplies 4 corners per rectangle in TL, BL, TR, BR order,
+    // which is exactly a two-triangle strip, so deko3d can draw it with the
+    // existing index path and no shader change. (The 3-vertex form D3D9 uses for
+    // resolves degenerates to a single triangle; it is a no-op here because this
+    // backend does not implement the resolve trick.)
+    case xenos::PrimitiveType::kRectangleList:
+      return DkPrimitive_TriangleStrip;
     case xenos::PrimitiveType::kQuadList:
       return DkPrimitive_Quads;
     case xenos::PrimitiveType::kQuadStrip:
@@ -279,6 +300,14 @@ bool Deko3DCommandProcessor::SetupContext() {
     shared_memory_.reset();
     return false;
   }
+    // Run-066: hand the texture cache the frame's command list, so uploads are
+    // recorded into the frame and submitted with the frame fence - the only submit
+    // path proven to execute here (run 065: standalone lists never reached the GPU).
+    if (texture_cache_) {
+      texture_cache_->set_frame_recorder([this]() -> dk::CmdBuf* {
+        return render_target_cache_ ? render_target_cache_->BeginRecording() : nullptr;
+      });
+    }
   device_->LogMemory("gpu setup: texture cache");
   shader_code_ = std::make_unique<Deko3DShaderCodeArena>(*device_);
   shader_code_->set_per_warp_scratch_size(ui::deko3d::Deko3DDevice::kPerWarpScratchSize);
@@ -1232,6 +1261,12 @@ bool Deko3DCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
     return IssueCopy();
   }
 
+  // Diagnostic draw isolation (run 042). Before touching the command list or
+  // the rings, so no draw state is recorded at all.
+  if (REXCVAR_GET(deko3d_skip_draws)) {
+    return DrawSkipped("diagnostic_skip_draws");
+  }
+
   // Open this frame's command list first. Opening it waits for the previous
   // frame's fence and recycles the per-frame rings, and everything below writes
   // to those rings or to the shared memory mirror (primitive conversion,
@@ -1323,6 +1358,18 @@ bool Deko3DCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   bool primitive_supported = false;
   const DkPrimitive dk_primitive =
       GetDkPrimitive(primitive_processing_result.host_primitive_type, primitive_supported);
+  if (primitive_supported &&
+      primitive_processing_result.host_primitive_type == xenos::PrimitiveType::kRectangleList) {
+    // Proves the fix in the log: a non-zero count here means rectangle-list UI
+    // geometry is reaching deko3d instead of being skipped.
+    static uint32_t rect_draws = 0;
+    ++rect_draws;
+    if (rect_draws <= 8 || (rect_draws % 300) == 0) {
+      REXGPU_WARN("[primitive] rectangle list #{} drawn as a triangle strip (4 corners = 2 "
+                  "triangles per rectangle)",
+                  rect_draws);
+    }
+  }
   if (!primitive_supported) {
     char detail[96];
     detail[0] = '\0';

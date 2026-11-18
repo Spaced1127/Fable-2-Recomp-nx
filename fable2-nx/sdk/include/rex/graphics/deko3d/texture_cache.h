@@ -12,6 +12,7 @@
 
 #pragma once
 
+#include <functional>
 #include <memory>
 
 #include <deko3d.hpp>
@@ -38,6 +39,14 @@ class Deko3DTextureCache final : public TextureCache {
 
   bool Initialize();
   void Shutdown();
+
+  // Run-066: the command processor hands us its current frame list, so texture
+  // copies are recorded into the frame and submitted with the frame fence - the
+  // one submit path proven to execute. Returning nullptr keeps the old
+  // immediate-submit fallback.
+  void set_frame_recorder(std::function<dk::CmdBuf*()> recorder) {
+    frame_recorder_ = std::move(recorder);
+  }
 
   // What a draw binds for one texture fetch constant.
   struct BoundTexture {
@@ -76,6 +85,17 @@ class Deko3DTextureCache final : public TextureCache {
  private:
   class TextureImpl;
 
+  // Run-056 one-shot upload self-test (cvar deko3d_upload_probe). Submits one
+  // small copyBufferToImage per variant on the shared queue at boot and logs
+  // which ones complete. Returns true when every variant it attempted did.
+  bool RunUploadProbe();
+
+  // Run-061: one 64x64 copy there and back, byte compared (cvar
+  // deko3d_upload_validate).
+  bool RunCopyDiagnostic();
+  bool RunCopyBisect();
+  bool RunCopySyncTest();
+
   ui::deko3d::Deko3DDevice& device_;
   dk::UniqueCmdBuf upload_command_buffer_;
   dk::UniqueMemBlock upload_command_memory_;
@@ -85,6 +105,10 @@ class Deko3DTextureCache final : public TextureCache {
   dk::Fence upload_fence_{};
   FenceWaitStats upload_fence_stats_;
   bool upload_stopped_ = false;
+  std::function<dk::CmdBuf*()> frame_recorder_;
+  // Set by RunUploadValidate (step 0): whether a fence signalled in a clean
+  // process. Retirement prefers fences when they work and falls back to age.
+  bool fences_signalled_ = false;
 };
 
 }  // namespace rex::graphics::deko3d

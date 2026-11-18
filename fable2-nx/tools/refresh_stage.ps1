@@ -1,7 +1,7 @@
 # Refresh the staged NRO (and the config) in H:\Projects\Fable2Port\stage
 # without touching the 6.6 GB Game_files copy.
 $ErrorActionPreference = "Stop"
-$repo = "H:\Projects\Fable2Port\fable2-nx"
+$repo = "H:\Projects\Fable2Port\Fable-2-Recomp-nx\fable2-nx"
 $dest = "H:\Projects\Fable2Port\stage\switch\Fable II"
 
 $nro = Join-Path $repo "port\build\fable_2.nro"

@@ -25,6 +25,16 @@ namespace {
 // because the process runs near its memory pool limit; kDrawsPerCommandList
 // bounds how much a single list can hold instead.
 constexpr uint32_t kCommandMemorySize = 2 << 20;
+// Run-060: frames' worth of command memory, rotated instead of reused.
+//
+// A command list is read by the GPU from the memblock it was recorded into, so
+// re-recording the same block next frame rewrites bytes the GPU may still be
+// reading. With the fence gone (run 058) that is a real race and it is the
+// likeliest cause of run 059's silent host death - presents went from ~0.5 to
+// ~25 per second, so the window collapsed. Three slots means a block is only
+// rewritten after two full frames have been submitted behind it, which is
+// "retired by age" rather than by a signal that never arrives.
+constexpr uint32_t kCommandSlots = 3;
 // Draws recorded before the list is split and submitted mid-frame. A draw with
 // a full state change is on the order of a hundred 4-byte words, so this leaves
 // a few times of headroom inside kCommandMemorySize.
@@ -124,7 +134,7 @@ Deko3DRenderTargetCache::~Deko3DRenderTargetCache() = default;
 
 bool Deko3DRenderTargetCache::Initialize() {
   InitializeCommon();
-  command_memory_ = dk::MemBlockMaker{device_.device(), kCommandMemorySize}
+  command_memory_ = dk::MemBlockMaker{device_.device(), kCommandMemorySize * kCommandSlots}
                         .setFlags(DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached)
                         .create();
   if (!command_memory_) {
@@ -182,13 +192,11 @@ bool Deko3DRenderTargetCache::EnsureRecording() {
   // has already met twice, and this is the thread that drives the guest ring:
   // blocking here forever stops the game, not just the renderer.
   if (resolve_pending_) {
-    if (!WaitFence(resolve_fence_, "previous frame's render list", resolve_fence_stats_)) {
-      rendering_stopped_ = true;
-      REXGPU_WARN(
-          "deko3d: giving up on render recording; the guest ring keeps advancing and "
-          "the last frame presented stays on screen");
-      return false;
-    }
+    // Run-059/063: poll instead of waiting here. Fences do signal (run 062), but
+    // this particular one is only a pacing hint for command-memory reuse, and
+    // waiting on it stalled the frame loop when it did not arrive. Recording is
+    // never abandoned; the queue is ordered, so the next list follows the resolve.
+    PollFence(resolve_fence_, "previous frame's render list", resolve_fence_stats_);
     resolve_pending_ = false;
     for (const std::pair<uint32_t, uint32_t>& range : gpu_written_ranges_) {
       shared_memory_.RangeWrittenByGpu(range.first, range.second);
@@ -200,8 +208,13 @@ bool Deko3DRenderTargetCache::EnsureRecording() {
     logged_record_start = true;
     REXGPU_INFO("deko3d: render target recording started");
   }
+  // Next command slot: the previous two frames keep the bytes the GPU may still
+  // be reading (see kCommandSlots).
+  static uint32_t command_slot = 0;
+  command_slot = (command_slot + 1) % kCommandSlots;
   command_buffer_.clear();
-  command_buffer_.addMemory(command_memory_, 0, command_memory_.getSize());
+  command_buffer_.addMemory(command_memory_, command_slot * kCommandMemorySize,
+                            kCommandMemorySize);
   recording_ = true;
   has_commands_ = false;
   draws_since_submit_ = 0;
@@ -228,13 +241,9 @@ bool Deko3DRenderTargetCache::WaitForPendingList(const char* before_what) {
   if (!resolve_pending_) {
     return true;
   }
-  if (!WaitFence(resolve_fence_, before_what, resolve_fence_stats_)) {
-    rendering_stopped_ = true;
-    REXGPU_WARN("deko3d: the render list submitted before %s never completed; render "
-                "recording is stopped",
-                before_what);
-    return false;
-  }
+  // Run-059: poll only (see EnsureRecording). A draw must never be skipped or the
+  // recording stopped because a fence that cannot signal is late.
+  PollFence(resolve_fence_, before_what, resolve_fence_stats_);
   resolve_pending_ = false;
   for (const std::pair<uint32_t, uint32_t>& range : gpu_written_ranges_) {
     shared_memory_.RangeWrittenByGpu(range.first, range.second);
@@ -275,15 +284,14 @@ void Deko3DRenderTargetCache::SubmitAndWaitForReuse() {
     device_.queue().submitCommands(list);
     device_.queue().signalFence(reuse_fence_, true);
   }
+  NoteGpuSubmit();
   // Blocking on purpose: the command memory and the per-frame rings are about to
   // be written again, so the GPU must have finished reading them. Bounded for the
   // same reason as every other wait - a stall must become a log line, not a hung
   // game thread.
-  if (!WaitFence(reuse_fence_, "mid-frame command list", reuse_fence_stats_)) {
-    rendering_stopped_ = true;
-    REXGPU_WARN("deko3d: giving up on render recording after a mid-frame list split");
-    return;
-  }
+  // Run-059: poll only. The command memory is reused either way; waiting bought
+  // nothing but a stall per split.
+  PollFence(reuse_fence_, "mid-frame command list", reuse_fence_stats_);
   for (const std::pair<uint32_t, uint32_t>& range : gpu_written_ranges_) {
     shared_memory_.RangeWrittenByGpu(range.first, range.second);
   }

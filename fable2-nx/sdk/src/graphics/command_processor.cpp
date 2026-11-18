@@ -1087,6 +1087,12 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
   const uint64_t wait_start = log_waits ? rex::chrono::Clock::QueryHostTickCount() : 0;
   uint32_t polls = 0;
   const bool trace = rex::timeline::Enabled();
+  // [M1] A WAIT_REG_MEM that never matches produces no log at all (the 5 s
+  // statistics print only after the wait completes), which is exactly what the
+  // 8-9 s menu-load silence looks like. Report any single wait longer than 2 s
+  // (then at most every 10 s) so a stuck condition names itself.
+  const uint64_t stuck_begin = rex::chrono::Clock::QueryHostTickCount();
+  uint64_t stuck_last_report = stuck_begin;
 
   bool matched = false;
   do {
@@ -1131,6 +1137,20 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
     }
     if (!matched) {
       if (trace && polls == 1) rex::timeline::Record(rex::timeline::kGpuWaitBegin, poll_reg_addr, ref);
+      {
+        const uint64_t now_ticks = rex::chrono::Clock::QueryHostTickCount();
+        const uint64_t tick_freq = rex::chrono::Clock::QueryHostTickFrequency();
+        if (tick_freq && now_ticks - stuck_begin >= tick_freq * 2 &&
+            now_ticks - stuck_last_report >= tick_freq * 10) {
+          stuck_last_report = now_ticks;
+          REXGPU_WARN(
+              "[gpu-wait] stuck {:.1f}s on {} 0x{:08X} (value 0x{:X}) ref 0x{:X} mask 0x{:X} "
+              "info 0x{:X} wait 0x{:X}, {} polls",
+              double(now_ticks - stuck_begin) / double(tick_freq),
+              is_memory ? "mem" : "reg", poll_reg_addr, value & mask, ref, mask, wait_info, wait,
+              polls);
+        }
+      }
       // Wait.
       if (wait >= 0x100) {
         PrepareForWait();

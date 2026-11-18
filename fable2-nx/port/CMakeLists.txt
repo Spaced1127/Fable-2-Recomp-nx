@@ -33,6 +33,8 @@ set(FABLE2_SOURCES
     src/core/fable2_patches.cpp
     src/core/fable2_hooks.cpp
     src/core/fable2_address_scan.cpp
+    src/core/gui_null_witness.cpp
+    src/core/vm_null_probe.cpp
     ${HOTFUNC_SOURCES}
 )
 

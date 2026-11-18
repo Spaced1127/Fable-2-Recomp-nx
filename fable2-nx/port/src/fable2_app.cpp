@@ -47,6 +47,16 @@ namespace {
 // screen while the guest stays alive (Home works). svr2011-nx hits the same
 // trap and defaults it in OnPreSetup; do the same here.
 void Fable2App::OnPreSetup(rex::RuntimeConfig& config) {
+  // Build identity for hardware logs. The NRO hash cannot be baked in here
+  // (a rebuild changes it), so the tag names the build family and the runner
+  // verifies the hash with Get-FileHash. Warn so it is flushed at once.
+  REXLOG_WARN("[fable2] build tag: m1-fix-068 "
+              "(synchronous copy test: WaitIdle + fence state + pixels, rows/bytes/tight)");
+  // Proves which witnesses this binary carries: run 059's log had no
+  // [vm-lookup] line and could not say whether the hook was missing or had simply
+  // not been reached before the process died.
+  REXLOG_WARN("[fable2] probes armed: vm-null fetch, vm-invoke, name-table lookup "
+              "(0x82C64018), per-present telemetry");
   if (config.gpu_plugin.empty()) {
     rex::cvar::SetFlagByName("gpu_plugin", "xenos");
     config.gpu_plugin = "xenos";

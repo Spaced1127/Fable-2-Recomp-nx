@@ -224,6 +224,69 @@ cr_as_local = true
 non_argument_as_local = true
 non_volatile_as_local = true
 
+# --- M1 run-049 diagnostics: which branch does sub_8233EEE0 take? ----------
+# The component update sub_8233EEE0 waits in a loop at 0x8233EFD4 while the
+# global byte at 0x834BE654 is non-zero, then joins at 0x8233F010 and calls the
+# update pass sub_825F3050 at 0x8233F060 (r3 = [component+4]). Run 048 logged
+# [gui-pass] and [gui-upd] but not on the same edge, because [gui-upd] logs
+# AFTER the update returns. These two mid-asm markers stamp the wait loop and
+# the join/pass path with the component (r31), its +36 state, the manager, the
+# fault chain ([r31+0x24] -> [+4]) and the loop byte, so the next log shows
+# which branch the faulting instance took and when relative to [gui-pass].
+# Passive: reads only. Remove with the rest of the M1 diagnostics.
+[[entrypoint.midasm_hook]]
+address = 0x8233EFD4
+name = "fable2_hook_gui_mark_wait"
+registers = ["r3", "r29", "r31"]
+[[entrypoint.midasm_hook]]
+address = 0x8233F010
+name = "fable2_hook_gui_mark_pass"
+registers = ["r3", "r29", "r31"]
+
+# --- M1 run-050 probe: why does sub_825F45A8 return 0? ----------------------
+# Run 049 proved the update reaches the pass (gui-mark pass -> gui-pass 4 ms
+# later) and spends 4.1 s inside it; sub_825F3050 leaves at loc_825F389C when
+# sub_825F45A8 returns 0, which skips every batch list and the writer. These
+# markers log the deciding byte, the twelve batch-vector counts, the early-exit
+# call, the single bit test inside sub_825F45A8 that can return 0, and the
+# writer gate (only reached if the theory is wrong). Passive: reads only.
+[[entrypoint.midasm_hook]]
+address = 0x825F3208
+name = "fable2_hook_gui_batch_branch"
+registers = ["r3", "r1"]
+[[entrypoint.midasm_hook]]
+address = 0x825F389C
+name = "fable2_hook_gui_batch_exit"
+registers = ["r1", "r14", "r16", "r17", "r18", "r19"]
+[[entrypoint.midasm_hook]]
+address = 0x825F4668
+name = "fable2_hook_gui_bit"
+registers = ["r3", "r1"]
+[[entrypoint.midasm_hook]]
+address = 0x825F3510
+name = "fable2_hook_gui_gate"
+registers = ["r3", "r26"]
+
+# --- M1 run-052: localise the 4 s inside the pass setup --------------------
+# The key builder is 2 ms, so the 4.0 s sits in the four calls sub_825F3050
+# makes before it. One marker after each brackets them by timestamp.
+[[entrypoint.midasm_hook]]
+address = 0x825F3084
+name = "fable2_hook_gui_phase_a"
+registers = ["r3"]
+[[entrypoint.midasm_hook]]
+address = 0x825F3088
+name = "fable2_hook_gui_phase_b"
+registers = ["r3"]
+[[entrypoint.midasm_hook]]
+address = 0x825F3094
+name = "fable2_hook_gui_phase_c"
+registers = ["r3"]
+[[entrypoint.midasm_hook]]
+address = 0x825F3098
+name = "fable2_hook_gui_phase_d"
+registers = ["r3"]
+
 # Invalid instruction skips: 32-bit values (big-endian) the recompiler skips
 # over during its linear .text walk instead of analyzing them as functions.
 #   0x00000000      -- zero padding between functions (not a valid PPC insn)

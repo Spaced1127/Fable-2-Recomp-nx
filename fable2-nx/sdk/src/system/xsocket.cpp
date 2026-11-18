@@ -21,6 +21,14 @@
 
 #include <rex/net/socket.h>
 
+#if defined(__SWITCH__)
+#include <mutex>
+
+#include <switch.h>
+
+#include <rex/logging/macros.h>
+#endif
+
 // Standard socket types used by Xbox API emulation
 #if REX_PLATFORM_WIN32
 #include <WinSock2.h>
@@ -58,7 +66,29 @@ X_STATUS XSocket::Initialize(AddressFamily af, Type type, Protocol proto) {
 
   native_handle_ = socket(af, type, proto);
   if (native_handle_ == -1) {
-    return X_STATUS_UNSUCCESSFUL;
+#if defined(__SWITCH__)
+    // Run 055: Horizon's BSD service must be brought up before the first
+    // socket(); without it socket() fails with EINVAL (reported as WSAEINVAL
+    // 10022) and the guest's online init dereferences the missing socket.
+    // One lazy init covers every socket the title creates.
+    static std::once_flag socket_service_once;
+    static bool socket_service_ok = false;
+    std::call_once(socket_service_once, [] {
+      const Result rc = socketInitializeDefault();
+      socket_service_ok = R_SUCCEEDED(rc);
+      if (socket_service_ok) {
+        REXSYS_INFO("[socket] Horizon BSD service initialised (socketInitializeDefault)");
+      } else {
+        REXSYS_WARN("[socket] socketInitializeDefault failed: 0x{:08X}", uint32_t(rc));
+      }
+    });
+    if (socket_service_ok) {
+      native_handle_ = socket(af, type, proto);
+    }
+#endif
+    if (native_handle_ == -1) {
+      return X_STATUS_UNSUCCESSFUL;
+    }
   }
 
   return X_STATUS_SUCCESS;
