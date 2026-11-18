@@ -19,6 +19,8 @@ std::atomic<uint64_t> g_submit_epoch{1};
 std::atomic<bool> g_fence_observed{false};
 std::atomic<uint64_t> g_present_epoch{0};
 std::atomic<uint64_t> g_texture_uploads{0};
+std::atomic<uint64_t> g_frame_submit_epoch{0};
+std::atomic<uint32_t> g_frame_upload_copies{0};
 }  // namespace
 
 void NoteGpuSubmit() { g_submit_epoch.fetch_add(1, std::memory_order_relaxed); }
@@ -29,6 +31,10 @@ uint64_t PresentEpoch() { return g_present_epoch.load(std::memory_order_relaxed)
 uint64_t GpuSubmitEpoch() { return g_submit_epoch.load(std::memory_order_relaxed); }
 void NoteTextureUpload() { g_texture_uploads.fetch_add(1, std::memory_order_relaxed); }
 uint64_t TextureUploadCount() { return g_texture_uploads.load(std::memory_order_relaxed); }
+void NoteFrameSubmitted() { g_frame_submit_epoch.fetch_add(1, std::memory_order_relaxed); }
+uint64_t FrameSubmitEpoch() { return g_frame_submit_epoch.load(std::memory_order_relaxed); }
+void NoteFrameUploadCopy() { g_frame_upload_copies.fetch_add(1, std::memory_order_relaxed); }
+uint32_t TakeFrameUploadCopyCount() { return g_frame_upload_copies.exchange(0, std::memory_order_relaxed); }
 
 // How long any GPU wait may block. Fences signal in ~5 ms once the submission is
 // kicked (run 068), so this bound is only about a *stuck* queue: 250 ms keeps a

@@ -98,6 +98,18 @@ uint64_t PresentEpoch();
 void NoteTextureUpload();
 uint64_t TextureUploadCount();
 
+// Run-070 staging lifetime: FrameSubmitEpoch() bumps once per frame render-list
+// submit (Flush). A staging block recorded into the frame list is pinned to
+// cohort = FrameSubmitEpoch()+1 (the frame it rides) and may be released only
+// when PresentEpoch() >= cohort+1 - i.e. a LATER frame's present fence has
+// signalled, which on the in-order queue proves the cohort's copies completed.
+// Never release on age alone: the GPU may still be reading the block.
+void NoteFrameSubmitted();
+uint64_t FrameSubmitEpoch();
+// Counts upload copies recorded into the current frame list (logged at submit).
+void NoteFrameUploadCopy();
+uint32_t TakeFrameUploadCopyCount();
+
 // Run-069: print the frame-path upload probe's readback (non-blocking). Called by
 // the presenter on every present so a death shortly after the first upload cannot
 // pre-empt the pixels (run 068: armed, then death 240 ms later, nothing printed).

@@ -4,7 +4,7 @@ Ranked milestones. Each needs the listed evidence from a **hardware run**; a
 change is not "done" until that evidence exists. Ordered so each one is
 observable on its own.
 
-## Where we are (after run 068, run-069 package prepared)
+## Where we are (after run 069, run-070 package prepared)
 
 Standing goal and F1-F5 status: [GOAL.md](../../GOAL.md).
 
@@ -13,7 +13,8 @@ Standing goal and F1-F5 status: [GOAL.md](../../GOAL.md).
 | `read of guest 0x00000000` in `sub_821C95D8`, ~48 s | guest VM (script argument) | argument 1 is nil; host-side work named the object it should be - the entity **`BowerstoneMarketExit_Gate` (`0xE6CCB784`)** from `data\levels.bnk`, resolved by name at runtime. run-059 hooks the engine's name-table lookup (`0x82C64018`) and logs key + result per call, which decides "table empty (mount never ran)" vs "populated, entry missing (registration)". Not reached since 058: the ~10 s below-guest death fires first |
 | ~10 s below-guest death (F2) | host / GPU channel | every run 059-067 dies at ~9-10 s during a `gui_textures.bnk` / `Globals` texture-bank read, no new crash block (`98A1A23D...` unchanged). Run-042 saw the Horizon fatal-error message: OS kill, not a guest fault. Candidates: command-memory reuse vs GPU read, a bad upload DMA once copies execute, or the first sampling draw |
 | 2D copy (F1, half 1) | host renderer | **PROVEN on hardware (run 068): EXECUTED.** Descriptor A canonical (rowLength 4096 B, imageHeight 720 rows, Usage2DEngine tiled); waitIdle 5 ms, fence signalled, readback = the pattern. Mechanism: `submitCommands`/`signalFence` never kick the channel; only `presentImage`/`waitIdle`/explicit `flush` do - all earlier "fence never signals / copy fails" verdicts were unfetched submissions. Run-069 applies flush + bounded waits everywhere |
-| blank screen (F1, half 2) | host renderer / guest draws | run-069 reads the guest output image (branch=1 surface) back at present 30/150: uniform clear -> guest never drew (upstream draw/target binding; the 540/run no_render_targets skips censused by class, first MASKED skip register-dumped); content -> present copy/swapchain at fault. In-frame upload probe now presenter-polled (run 068's was pre-empted by the death) |
+| blank screen (F1, half 2) | guest state (upstream of renderer) | run-069 PROVED the surface static white (fnv1a identical #30/#150, grid FFFFFFFF): presenter/copy innocent. Guest draws 1 static frame + 24 legitimate null draws (masked=0) - a boot/static-screen state, never menu content. Why the guest is stuck there is the next F1 target once survival allows |
+| post-upload-batch death (F2) | host renderer | every run whose copies execute dies ~100-200 ms after the first batch is kicked. Batch led by xenos 23 = ZF32_X24S8 DEPTH copy (2D engine cannot target depth; RGBA8 proofs never covered it). Run-070: depth uploads skipped (named, opt-out) + staging pinned to fence-witnessed frame cohorts (never age). If it survives: RGB10A2 copies / first sampling draw are the next discriminators |
 | display | host renderer | presents every guest frame (`[present] #N branch=1 age=1`, 180+/run, no `giving up on render recording`); present fence signals at #1. Screen still blank: no texture pixel has ever been proven in a GPU image, and rectangle-list UI geometry draws without textures |
 
 M1 is the crash gate: the process cannot survive to the milestones below it. The

@@ -301,8 +301,9 @@ bool Deko3DCommandProcessor::SetupContext() {
     return false;
   }
     // Run-066: hand the texture cache the frame's command list, so uploads are
-    // recorded into the frame and submitted with the frame fence - the only submit
-    // path proven to execute here (run 065: standalone lists never reached the GPU).
+    // recorded into the frame and kicked by the frame's presentImage. (Run-068
+    // correction: standalone lists execute too once flushed - run 065's "never
+    // reached the GPU" was the missing-kickoff artefact.)
     if (texture_cache_) {
       texture_cache_->set_frame_recorder([this]() -> dk::CmdBuf* {
         return render_target_cache_ ? render_target_cache_->BeginRecording() : nullptr;

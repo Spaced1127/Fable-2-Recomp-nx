@@ -66,6 +66,16 @@ REXCVAR_DEFINE_BOOL(deko3d_copy_sync, true, "GPU/deko3d",
                     "EXECUTED/DROPPED/WEDGED. Descriptor A (rows) only by default.")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
+// Run-070: skip buffer->image uploads whose deko3d format is depth/stencil (the
+// 2D engine cannot target them; run-069's fatal batch was led by a ZF32_X24S8
+// copy that the RGBA8-only proofs never covered). Set false to A/B the old
+// behaviour and reproduce the death.
+REXCVAR_DEFINE_BOOL(deko3d_upload_skip_depth, true, "GPU/deko3d",
+                    "Skip depth/stencil-format texture uploads (2D engine cannot target depth); "
+                    "they sample the placeholder until a DKSH resolve exists. Run-070 "
+                    "discriminator for the post-upload-batch death.")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
 // Run-068: descriptors B (imageHeight = total bytes - the run-060 OS-kill DMA if
 // it executes) and C (tight 0/0) are opt-in. A alone decides the verdict for the
 // descriptor the port uses; one measured variable per hardware run.
@@ -133,11 +143,23 @@ void PollFrameUploadProbe() {
       ++changed;
     }
   }
+  // 4x4 sample grid of the 64x64 readback (16-px spacing, pitch 4096).
+  char grid[4 * 4 * 9 + 4];
+  size_t off = 0;
+  for (uint32_t gy = 0; gy < 4; ++gy) {
+    for (uint32_t gx = 0; gx < 4; ++gx) {
+      const uint8_t* px = bytes + size_t(gy * 16 + 8) * 4096 + (gx * 16 + 8) * 4;
+      off += size_t(std::snprintf(grid + off, sizeof(grid) - off, "%02X%02X%02X%02X ",
+                                  px[0], px[1], px[2], px[3]));
+    }
+    if (gy < 3) grid[off++] = '|';
+  }
+  grid[off] = '\0';
   REXGPU_WARN("[upload] frame-path readback (presenter poll): {} of the first 32768 bytes "
               "differ from the 0xAA pre-fill; first bytes [{:02X}{:02X}{:02X}{:02X} "
-              "{:02X}{:02X}{:02X}{:02X}] - {}",
+              "{:02X}{:02X}{:02X}{:02X}] grid=[{}] - {}",
               changed, bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6],
-              bytes[7],
+              bytes[7], grid,
               changed ? "the frame-recorded upload LANDED pixels"
                       : "still the pre-fill - the frame-recorded copy produced nothing");
 }
@@ -1240,6 +1262,30 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
     return true;
   }
 
+  // Run-070: the 2D engine cannot target depth/stencil formats. Run-069's first
+  // upload batch was led by xenos format 23 = k_24_8_FLOAT -> DkImageFormat
+  // ZF32_X24S8 (deko 45) - the copy-sync/bisect proofs used RGBA8 and never
+  // covered it, and every run whose copies actually execute dies ~100-250 ms
+  // after that batch is kicked. Skip depth-format uploads (placeholder, the
+  // pre-run-043 behaviour that survived 40+ s) until a DKSH resolve exists;
+  // the skip is named so the log proves which formats rode the fatal frame.
+  if (REXCVAR_GET(deko3d_upload_skip_depth)) {
+    const DkImageFormat fmt = deko_texture.format();
+    if (fmt == DkImageFormat_S8 || fmt == DkImageFormat_Z16 ||
+        fmt == DkImageFormat_Z24X8 || fmt == DkImageFormat_ZF32 ||
+        fmt == DkImageFormat_Z24S8 || fmt == DkImageFormat_ZF32_X24S8) {
+      static uint32_t skipped_depth = 0;
+      ++skipped_depth;
+      if (skipped_depth <= 8 || (skipped_depth % 64) == 0) {
+        REXGPU_WARN("[upload] SKIPPED depth/stencil format (xenos {} -> deko {}), {}x{} - the 2D "
+                    "engine cannot target depth; placeholder until a DKSH resolve (skip #{})",
+                    uint32_t(key.format), uint32_t(fmt), deko_texture.width(),
+                    deko_texture.height(), skipped_depth);
+      }
+      return true;
+    }
+  }
+
   // The base-level-only upload is enough to start; mips and arrays are a
   // follow-up once the DKSH pipeline can sample them.
   if (key.depth_or_array_size_minus_1 != 0 ||
@@ -1406,19 +1452,39 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
                   "rowLength {} bytes, imageHeight {} rows)",
                   frame_recorded, width, height, source_pitch, blocks_high);
     }
-    // The block must outlive the frame that reads it; the frame fence tells us, so
-    // retirement keys off the frame's own signal (or age as the last resort).
+    // Run-070: staging lifetime pinned to the frame the copy RIDES, not to the
+    // present epoch at pin time. Cohort = the next frame submit; release only
+    // when PresentEpoch() >= cohort+1, i.e. a LATER frame's present fence has
+    // signalled - on the in-order queue that proves this cohort's copies
+    // completed. The old "present epoch at upload + 2" rule could free a block
+    // before its (long) frame was even submitted; never free on age alone.
     static std::vector<std::unique_ptr<dk::UniqueMemBlock>> frame_staging;
-    static std::vector<uint64_t> frame_epochs;
+    static std::vector<uint64_t> frame_cohorts;
+    const uint64_t cohort = FrameSubmitEpoch() + 1;
     const uint64_t now_present = PresentEpoch();
+    uint32_t released = 0;
     for (size_t i = frame_staging.size(); i-- > 0;) {
-      if (now_present >= frame_epochs[i] && (now_present - frame_epochs[i]) >= 2) {
+      if (now_present >= frame_cohorts[i] + 1) {
         frame_staging.erase(frame_staging.begin() + ptrdiff_t(i));
-        frame_epochs.erase(frame_epochs.begin() + ptrdiff_t(i));
+        frame_cohorts.erase(frame_cohorts.begin() + ptrdiff_t(i));
+        ++released;
       }
     }
+    if (released) {
+      static uint32_t release_logs = 0;
+      ++release_logs;
+      if (release_logs <= 12 || (release_logs % 64) == 0) {
+        REXGPU_WARN("[staging] released {} block(s) on the present-fence witness (present epoch "
+                    "{}, {} still pinned)", released, now_present, uint32_t(frame_staging.size()));
+      }
+    }
+    if (frame_staging.size() > 4096) {
+      REXGPU_WARN("[staging] WARNING: {} blocks pinned - presents are not advancing the witness",
+                  uint32_t(frame_staging.size()));
+    }
     frame_staging.push_back(std::move(staging));
-    frame_epochs.push_back(now_present);
+    frame_cohorts.push_back(cohort);
+    NoteFrameUploadCopy();
 
     // Run-066 acceptance: prove the FRAME-path upload lands pixels. On the first
     // recorded upload, also record a 64x64 copy back from the image into a block
@@ -1512,28 +1578,23 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
   // its FAIL verdicts were the missing-kickoff artefact, corrected by run 068's
   // EXECUTED. The function stays for opt-in A/B only; nothing calls it by default.
 
-  // Retire by FENCE (primary - run 068 proved fences signal once kicked), by
-  // present-age (the queue is in-order, so two presents past the copy's frame
-  // mean it executed), or by submit-age as the last-resort bound.
-  constexpr uint64_t kStagingRetireEpochs = 64;  // last resort only
+  // Retire by FENCE (primary - run 068 proved fences signal once kicked) or by
+  // the cohort witness (a LATER frame's present fence signalled). Run-070: no
+  // age-only release - the GPU may still be reading the block.
   static FenceWaitStats retire_fence_stats;
   const uint64_t now_present = PresentEpoch();
   // Acquire before looking at (or reusing) any block the GPU may have read.
   std::atomic_thread_fence(std::memory_order_acquire);
-  const uint64_t now_epoch = GpuSubmitEpoch();
   for (size_t i = deferred_fences.size(); i-- > 0;) {
-    // The copy's own fence is primary (it signals once the submit is kicked);
-    // the present age is the in-order witness: once two frames later have been
-    // presented, the copy has executed and the block can be freed. Age 64 is only
-    // a last-resort bound so the list cannot grow without limit.
+    // Run-070: the copy's own fence is primary (the submit is flushed, so it
+    // signals); the in-order witness is a LATER frame's present fence - cohort =
+    // the next frame submit at pin time, released at PresentEpoch >= cohort+1.
+    // No age-only release: the GPU may still be reading the block.
     const bool fence_done =
         deferred_fences[i] &&
         PollFence(*deferred_fences[i], "texture staging", retire_fence_stats);
-    const bool witnessed = now_present >= deferred_present_epochs[i] &&
-                           (now_present - deferred_present_epochs[i]) >= 2;
-    const bool aged_out = now_epoch >= deferred_epochs[i] &&
-                          (now_epoch - deferred_epochs[i]) >= kStagingRetireEpochs;
-    if (fence_done || witnessed || aged_out) {
+    const bool witnessed = now_present >= deferred_present_epochs[i] + 1;
+    if (fence_done || witnessed) {
       deferred_fences.erase(deferred_fences.begin() + ptrdiff_t(i));
       deferred_staging.erase(deferred_staging.begin() + ptrdiff_t(i));
       deferred_epochs.erase(deferred_epochs.begin() + ptrdiff_t(i));
@@ -1561,12 +1622,14 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
   deferred_staging.push_back(std::move(staging));
   deferred_fences.push_back(std::move(fence));
   deferred_epochs.push_back(GpuSubmitEpoch());
-  deferred_present_epochs.push_back(PresentEpoch());
+  // Run-070: pin to the cohort (next frame submit), released when a later
+  // frame's present fence has signalled - never on age alone.
+  deferred_present_epochs.push_back(FrameSubmitEpoch() + 1);
   static uint32_t no_wait_logged = 0;
   if (no_wait_logged < 12) {
     ++no_wait_logged;
     REXGPU_WARN("deko3d: uploaded texture {} ({}x{}, format {}) without a fence wait; "
-                "{} staging block(s) in flight, retired by age (8 submits)",
+                "{} staging block(s) in flight, retired by fence/cohort witness",
                 key.GetLogDimensionName(), width, height, uint32_t(key.format),
                 uint32_t(deferred_staging.size()));
   }

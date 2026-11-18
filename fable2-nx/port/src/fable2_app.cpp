@@ -50,10 +50,10 @@ void Fable2App::OnPreSetup(rex::RuntimeConfig& config) {
   // Build identity for hardware logs. The NRO hash cannot be baked in here
   // (a rebuild changes it), so the tag names the build family and the runner
   // verifies the hash with Get-FileHash. Warn so it is flushed at once.
-  REXLOG_WARN("[fable2] build tag: m1-f1-069 "
-              "(F1: guest-output readback at present 30/150 with blank/content verdict; "
-              "frame-upload probe presenter-polled + uncached; skip-draw census; flush+bounded "
-              "waits replace poll-give-up; death-watch heartbeat)");
+  REXLOG_WARN("[fable2] build tag: m1-f1-070 "
+              "(staging pinned to frame cohorts, released only on a later frame's present-fence "
+              "witness; depth/stencil-format uploads skipped - run-069's fatal batch was led by "
+              "ZF32_X24S8, untested by the RGBA8 proofs; probe grid; per-frame upload-copy count)");
   // Proves which witnesses this binary carries: run 059's log had no
   // [vm-lookup] line and could not say whether the hook was missing or had simply
   // not been reached before the process died.

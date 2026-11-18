@@ -351,6 +351,17 @@ bool Deko3DRenderTargetCache::Flush() {
     device_.queue().flush();
     resolve_pending_ = true;
   }
+  // Run-070: this is the frame submit the staging cohorts pin to.
+  NoteFrameSubmitted();
+  const uint32_t upload_copies = TakeFrameUploadCopyCount();
+  if (upload_copies) {
+    static uint32_t logged_frame_uploads = 0;
+    ++logged_frame_uploads;
+    if (logged_frame_uploads <= 12 || (logged_frame_uploads % 64) == 0) {
+      REXGPU_WARN("[frame] submit #{} carried {} upload copy/copies (staging pinned to this cohort)",
+                  FrameSubmitEpoch(), upload_copies);
+    }
+  }
   static bool logged_resolve_submit = false;
   if (!logged_resolve_submit) {
     logged_resolve_submit = true;

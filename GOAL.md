@@ -11,12 +11,14 @@ F5 HARDWARE - the packaged build boots and renders on the real Switch.
 
 ## Status line (keep current)
 
-**F1 OPEN** (run-068 PROVED the 2D copy executes and lands the pattern - descriptor A
-canonical; the blank-screen question is now the guest-output readback, run-069 pending)
-| **F2 OPEN** (~9.5 s below-guest death, all runs 059-068, crash block unchanged; instrumented)
-| **F3 OPEN** (menu draws, no pixels; VM-nil crash ~50 s when survival allows)
+**F1 OPEN** (copy PROVEN executing (068); guest-output surface PROVEN static white (069) -
+the guest draws 1 static frame, never menu content; fault is upstream of the presenter.
+Depth-format upload skip + staging cohorts in run-070 pending)
+| **F2 OPEN** (death ~100-200 ms after the first upload batch is kicked; prime suspect: the
+ZF32_X24S8 depth copy the 2D engine cannot target; staging lifetime fixed to fence witnesses)
+| **F3 OPEN** (guest stuck in boot/static-screen state; VM-nil crash ~50 s when survival allows)
 | **F4 OPEN** (guest input works; menu not yet visible)
-| **F5 PARTIAL** (packages boot on real Switch, screen blank) - last hardware run: 068.
+| **F5 PARTIAL** (packages boot on real Switch, screen static white) - last hardware run: 069.
 
 ## Autonomy contract (user-set)
 
