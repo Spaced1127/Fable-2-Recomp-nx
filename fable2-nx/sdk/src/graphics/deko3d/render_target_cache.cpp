@@ -11,6 +11,7 @@
 #include <mutex>
 
 #include <rex/graphics/deko3d/fence_wait.h>
+#include <rex/host_action.h>
 #include <rex/graphics/deko3d/render_target_cache.h>
 #include <rex/graphics/deko3d/shared_memory.h>
 #include <rex/graphics/registers.h>
@@ -354,6 +355,8 @@ bool Deko3DRenderTargetCache::Flush() {
   // Run-070: this is the frame submit the staging cohorts pin to.
   NoteFrameSubmitted();
   const uint32_t upload_copies = TakeFrameUploadCopyCount();
+  rex::NoteHostActionFast("frame submit #%llu upload-copies=%u",
+                          static_cast<unsigned long long>(FrameSubmitEpoch()), upload_copies);
   if (upload_copies) {
     static uint32_t logged_frame_uploads = 0;
     ++logged_frame_uploads;

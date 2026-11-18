@@ -22,6 +22,8 @@
 
 #include "dir_manifest_heal.h"  // fable2::manifestheal (self-heal data/dir.manifest)
 #include "fable2_address_scan.h"
+#include <rex/host_action.h>
+
 #include "fable2_config.h"  // fable2::config::Load / Get
 #include "fable2_patches.h"
 #include "game_branding.h"
@@ -50,10 +52,14 @@ void Fable2App::OnPreSetup(rex::RuntimeConfig& config) {
   // Build identity for hardware logs. The NRO hash cannot be baked in here
   // (a rebuild changes it), so the tag names the build family and the runner
   // verifies the hash with Get-FileHash. Warn so it is flushed at once.
-  REXLOG_WARN("[fable2] build tag: m1-f1-070 "
-              "(staging pinned to frame cohorts, released only on a later frame's present-fence "
-              "witness; depth/stencil-format uploads skipped - run-069's fatal batch was led by "
-              "ZF32_X24S8, untested by the RGBA8 proofs; probe grid; per-frame upload-copy count)");
+  REXLOG_WARN("[fable2] build tag: m1-f1-071 "
+              "(name the death: exit/abort/terminate markers per boot, crash blocks carry the "
+              "build tag + last-host-action ring, per-present GPU error-state witness, IO read "
+              "failures logged; staging cohorts + depth skip kept)");
+  // Run-071: stamp the crash blocks / marker file with this build's identity, so
+  // stale blocks (the exit() record dates to runs 057/058) cannot be mistaken
+  // for the current death.
+  RexSetCrashBuildTag("m1-f1-071");
   // Proves which witnesses this binary carries: run 059's log had no
   // [vm-lookup] line and could not say whether the hook was missing or had simply
   // not been reached before the process died.

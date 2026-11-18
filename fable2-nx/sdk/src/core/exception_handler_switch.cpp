@@ -72,6 +72,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <atomic>
 #include <cinttypes>
 #include <cstdarg>
 #include <cstdio>
@@ -79,6 +80,7 @@
 #include <utility>
 
 #include <rex/exception_handler.h>
+#include <rex/host_action.h>
 
 #include <switch.h>
 
@@ -405,13 +407,13 @@ void ScanStack(CrashBuf& b, uint64_t stack, uint64_t base, uint64_t text_lo, uin
   }
 }
 
-void WriteCrashFile(const char* data, size_t len) {
+void WriteTextFile(const char* filename, const char* data, size_t len) {
   FsFileSystem* fs = nullptr;
   char path[FS_MAX_PATH];
   // In <NRO folder>/logs/rex/ (switch_crash_hooks.c computes it at startup, without allocating here).
   // If that path cannot be translated, the default one.
   char ruta[FS_MAX_PATH];
-  std::snprintf(ruta, sizeof(ruta), "%srex_crash.log", RexSwitchLogDir());
+  std::snprintf(ruta, sizeof(ruta), "%s%s", RexSwitchLogDir(), filename);
   if ((fsdevTranslatePath(ruta, &fs, path) < 0 || !fs) &&
       (fsdevTranslatePath("sdmc:/switch/rex_crash.log", &fs, path) < 0 || !fs)) {
     return;
@@ -427,7 +429,79 @@ void WriteCrashFile(const char* data, size_t len) {
   fsFileClose(&f);
 }
 
+void WriteCrashFile(const char* data, size_t len) { WriteTextFile("rex_crash.log", data, len); }
+
+// Run-071: the last-host-action ring. Lock-free: the faulting thread may be
+// inside NoteHostAction when the crash logger dumps it.
+struct HostActionSlot {
+  std::atomic<uint64_t> stamp{0};
+  char text[160];
+};
+HostActionSlot g_host_actions[16];
+std::atomic<uint64_t> g_host_action_seq{0};
+char g_crash_build_tag[64] = "unknown";
+
+void NoteHostActionImpl(const char* fmt, va_list ap, bool to_file) {
+  const uint64_t s = g_host_action_seq.fetch_add(1, std::memory_order_relaxed) + 1;
+  HostActionSlot& slot = g_host_actions[(s - 1) % 16];
+  std::vsnprintf(slot.text, sizeof(slot.text), fmt, ap);
+  slot.stamp.store(s, std::memory_order_release);
+  if (to_file) {
+    // Per-line flushed, fs service (no stdio locks: a faulting thread may hold
+    // them). Low-rate events only - per-frame events use the ring-only path.
+    char line[256];
+    const int n = std::snprintf(line, sizeof(line), "[%llu] %s\n",
+                                static_cast<unsigned long long>(svcGetSystemTick()), slot.text);
+    if (n > 0) {
+      WriteTextFile("rex_actions.log", line, size_t(n));
+    }
+  }
+}
+
 }  // namespace
+
+namespace rex {
+
+void NoteHostAction(const char* fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  NoteHostActionImpl(fmt, ap, true);
+  va_end(ap);
+}
+
+void NoteHostActionFast(const char* fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  NoteHostActionImpl(fmt, ap, false);
+  va_end(ap);
+}
+
+size_t DumpHostActions(char* out, size_t cap) {
+  const uint64_t total = g_host_action_seq.load(std::memory_order_acquire);
+  const uint64_t first = total > 16 ? total - 16 : 0;
+  size_t off = 0;
+  for (uint64_t s = first + 1; s <= total && off + 1 < cap; ++s) {
+    const HostActionSlot& slot = g_host_actions[(s - 1) % 16];
+    if (slot.stamp.load(std::memory_order_acquire) != s) {
+      continue;  // slot being written right now
+    }
+    off += size_t(std::snprintf(out + off, cap - off, "  [%llu] %s\n",
+                                static_cast<unsigned long long>(s), slot.text));
+  }
+  return off;
+}
+
+void SetHostActionBuildTag(const char* tag) {
+  std::snprintf(g_crash_build_tag, sizeof(g_crash_build_tag), "%s", tag ? tag : "?");
+}
+
+}  // namespace rex
+
+extern "C" size_t RexDumpHostActions(char* out, size_t cap) {
+  return rex::DumpHostActions(out, cap);
+}
+
+extern "C" void RexSetCrashBuildTag(const char* tag) { rex::SetHostActionBuildTag(tag); }
 
 extern "C" void RexSwitchCrashLog(const char* reason, const ThreadExceptionDump* ctx,
                                   uint64_t stack, uint64_t pc) {
@@ -440,6 +514,23 @@ extern "C" void RexSwitchCrashLog(const char* reason, const ThreadExceptionDump*
   static CrashBuf b;
   b.len = 0;
 
+  // Run-071: per-boot marker, written FIRST (fs service, no stdio locks): proves
+  // a hook fired even if the crash-file write below fails. The rex_crash.log
+  // hash frozen since run 058 showed the 059-070 deaths fire NO hook at all -
+  // this file distinguishes "hook fired but write failed" from "no hook fired".
+  {
+    u64 tid0 = 0;
+    svcGetThreadId(&tid0, CUR_THREAD_HANDLE);
+    char marker[256];
+    const int n = std::snprintf(marker, sizeof(marker), "build=%s reason=%s hilo=%llu tick=%llu\n",
+                                g_crash_build_tag, reason ? reason : "?",
+                                static_cast<unsigned long long>(tid0),
+                                static_cast<unsigned long long>(svcGetSystemTick()));
+    if (n > 0) {
+      WriteTextFile("rex_exit_marker.log", marker, size_t(n));
+    }
+  }
+
   const uint64_t base = reinterpret_cast<uint64_t>(&_start);
   uint64_t text_lo = base, text_hi = base;
   MemoryInfo mi;
@@ -451,6 +542,7 @@ extern "C" void RexSwitchCrashLog(const char* reason, const ThreadExceptionDump*
   svcGetThreadId(&tid, CUR_THREAD_HANDLE);
 
   Append(b, "==== %s ====\n", reason ? reason : "?");
+  Append(b, "build: %s\n", g_crash_build_tag);
   Append(b, "hilo %" PRIu64 ", imagen 0x%016" PRIx64 " (codigo hasta 0x%016" PRIx64 ")\n", tid,
          base, text_hi);
   Append(b, "pc 0x%016" PRIx64 " = imagen+0x%" PRIx64 "\n", pc, pc - base);
@@ -500,6 +592,16 @@ extern "C" void RexSwitchCrashLog(const char* reason, const ThreadExceptionDump*
   }
 
   ScanStack(b, ctx ? ctx->sp.x : stack, base, text_lo, text_hi);
+  // Run-071: the last host actions, so the death correlates with a specific
+  // upload / frame / IO event even when the stack is guest code.
+  {
+    char actions[3200];
+    const size_t n = rex::DumpHostActions(actions, sizeof(actions));
+    if (n) {
+      Append(b, "ultimas acciones del host:\n");
+      Append(b, "%s", actions);
+    }
+  }
   Append(b, "\n");
   WriteCrashFile(b.data, b.len);
   busy.clear();

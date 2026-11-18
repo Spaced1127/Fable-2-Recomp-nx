@@ -20,6 +20,7 @@
 #include <rex/graphics/deko3d/shared_memory.h>
 #include <rex/graphics/deko3d/texture_cache.h>
 #include <rex/cvar.h>
+#include <rex/host_action.h>
 #include <rex/graphics/pipeline/texture/conversion.h>
 #include <rex/graphics/pipeline/texture/info.h>
 #include <rex/logging.h>
@@ -74,6 +75,14 @@ REXCVAR_DEFINE_BOOL(deko3d_upload_skip_depth, true, "GPU/deko3d",
                     "Skip depth/stencil-format texture uploads (2D engine cannot target depth); "
                     "they sample the placeholder until a DKSH resolve exists. Run-070 "
                     "discriminator for the post-upload-batch death.")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
+// Run-071: the frame-path probe records a copyImageToBuffer into the frame list
+// after the first upload. Opt-out so a later run can discriminate the probe
+// readback from the upload copies without a rebuild (default keeps it on).
+REXCVAR_DEFINE_BOOL(deko3d_upload_probe_frame, true, "GPU/deko3d",
+                    "Record the 64x64 frame-path upload readback into the frame list. Set false "
+                    "to A/B whether the probe readback itself is the fatal GPU command.")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 // Run-068: descriptors B (imageHeight = total bytes - the run-060 OS-kill DMA if
@@ -1276,6 +1285,8 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
         fmt == DkImageFormat_Z24S8 || fmt == DkImageFormat_ZF32_X24S8) {
       static uint32_t skipped_depth = 0;
       ++skipped_depth;
+      rex::NoteHostAction("upload SKIPPED depth xenos%u->deko%u %ux%u", uint32_t(key.format),
+                          uint32_t(fmt), deko_texture.width(), deko_texture.height());
       if (skipped_depth <= 8 || (skipped_depth % 64) == 0) {
         REXGPU_WARN("[upload] SKIPPED depth/stencil format (xenos {} -> deko {}), {}x{} - the 2D "
                     "engine cannot target depth; placeholder until a DKSH resolve (skip #{})",
@@ -1418,6 +1429,9 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
   static uint32_t upload_index = 0;
   ++upload_index;
   NoteTextureUpload();
+  rex::NoteHostAction("upload #%u %ux%u xenos%u->deko%u staging=%uB tiled=%u", upload_index, width,
+                      height, uint32_t(key.format), uint32_t(deko_texture.format()), staging_size,
+                      uint32_t(key.tiled));
   if (upload_index <= 24) {
     REXGPU_WARN("[upload] #{} {}x{} format {} -> deko {} ({} bytes staging, tiled {}, {} layers)",
                 upload_index, width, height, uint32_t(key.format),
@@ -1447,6 +1461,8 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
     frame_cmdbuf->barrier(DkBarrier_Full, DkInvalidateFlags_Image);
     static uint32_t frame_recorded = 0;
     ++frame_recorded;
+    rex::NoteHostAction("upload #%u recorded into FRAME list (rowLength=%u imageHeight=%u)",
+                        frame_recorded, source_pitch, blocks_high);
     if (frame_recorded <= 8 || (frame_recorded % 128) == 0) {
       REXGPU_WARN("[upload] #{} {}x{} recorded into the FRAME list (copy executes with the frame, "
                   "rowLength {} bytes, imageHeight {} rows)",
@@ -1490,8 +1506,9 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
     // recorded upload, also record a 64x64 copy back from the image into a block
     // pre-filled with 0xAA; a later upload logs those bytes once the frame that
     // carried them has been presented twice.
-    if (!g_frame_probe.armed && frame_recorded == 1) {
+    if (REXCVAR_GET(deko3d_upload_probe_frame) && !g_frame_probe.armed && frame_recorded == 1) {
       g_frame_probe.armed = true;
+      rex::NoteHostAction("frame probe armed (readback rides this frame list)");
       g_frame_probe.block = dk::MemBlockMaker{device_.device(), 4096 * 64}
                         .setFlags(DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached)
                         .create();

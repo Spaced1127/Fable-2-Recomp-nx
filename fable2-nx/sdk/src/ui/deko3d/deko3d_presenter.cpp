@@ -22,6 +22,7 @@
 #include <deko3d.hpp>
 
 #include <rex/graphics/deko3d/fence_wait.h>  // NoteGpuSubmit (run-060 age retirement)
+#include <rex/host_action.h>
 #include <rex/logging.h>
 #include <rex/ui/deko3d/deko3d_device.h>
 #include <rex/ui/deko3d/deko3d_presenter.h>
@@ -480,10 +481,24 @@ Presenter::PaintResult Deko3DPresenter::PaintAndPresentImpl(bool execute_ui_draw
   rex::graphics::deko3d::PollFrameUploadProbe();
   std::lock_guard dev_lock(impl_->device->submit_mutex());
   dk::Queue queue = impl_->device->queue();
+  // Run-071: GPU channel error witness. An invalid DMA faults the channel;
+  // deko3d marks the queue in-error and the OS kills the process ~100 ms later
+  // with NO crash block (the silent death of runs 059-070). Naming it here
+  // turns that death into a log line with its present number.
+  if (queue.isInErrorState()) {
+    static bool logged_gpu_error = false;
+    if (!logged_gpu_error) {
+      logged_gpu_error = true;
+      REXLOG_WARN("[gpu-error] queue in ERROR state at present #{} - GPU channel faulted; "
+                  "OS kill expected (this is the silent death)",
+                  impl_->present_count + 1);
+      rex::NoteHostAction("gpu-error: channel faulted at present #%u", impl_->present_count + 1);
+    }
+  }
   {
     // Run-066: the submit sites compared. This one demonstrably executes; the
-    // texture cache's standalone site does not (run 065), which is why uploads now
-    // ride this frame list instead.
+    // texture cache's standalone site does too once flushed (run-068 correction
+    // of run 065's missing-kickoff artefact).
     static bool logged_once = false;
     if (!logged_once) {
       logged_once = true;
@@ -646,10 +661,13 @@ Presenter::PaintResult Deko3DPresenter::PaintAndPresentImpl(bool execute_ui_draw
     // Run-069 death-watch: the ~9.5 s below-guest death writes no crash block, so
     // a periodic line names the last stage (uploads done, present slot) and the
     // memory left; the log tail then says what was in flight when it died.
+    rex::NoteHostActionFast("present #%u branch=%u guest#%u", impl_->present_count, branch_log,
+                            impl_->refresh_epoch);
     if ((impl_->present_count % 32) == 0) {
-      REXLOG_WARN("[death-watch] present #{}: texture uploads so far={}, present cmd slot={}",
+      REXLOG_WARN("[death-watch] present #{}: texture uploads so far={}, present cmd slot={}, "
+                  "gpu error state={}",
                   impl_->present_count, rex::graphics::deko3d::TextureUploadCount(),
-                  impl_->present_cmd_slot);
+                  impl_->present_cmd_slot, queue.isInErrorState() ? "YES" : "no");
       impl_->device->LogMemory("death-watch");
     }
   }

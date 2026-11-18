@@ -21,6 +21,7 @@
 #include <rex/filesystem/devices/host_path_file.h>
 #include <rex/kernel/xboxkrnl/private.h>
 #include <rex/logging.h>
+#include <rex/host_action.h>
 #include <rex/memory.h>
 #include <rex/hook.h>
 #include <rex/types.h>
@@ -654,6 +655,21 @@ u32 NtReadFile_entry(u32 file_handle, u32 event_handle, mapped_void apc_routine_
       const uint64_t io_fin_us = AhoraUs();
       AnotarLectura(io_fin_us - io_inicio_us, bytes_read, file->path(), desplazamiento);
       QuizaResumenIo(io_fin_us);
+      // Run-071: a failed or short read is what makes the guest give up and call
+      // XamShowDirtyDiscErrorUI (exit(1)) - name it instead of returning the
+      // status silently. END_OF_FILE short reads are included and tagged.
+      if (XFAILED(result) || bytes_read < buffer_length) {
+        static uint32_t logged_read_fails = 0;
+        if (logged_read_fails < 64) {
+          ++logged_read_fails;
+          REXKRNL_WARN("[io] READ SHORT/FAILED '{}' off={} req={} got={} status={:#x}",
+                       file->path(), desplazamiento, buffer_length, bytes_read, result);
+          rex::NoteHostAction("io read short/fail '%s' off=%llu req=%u got=%u st=%#x",
+                              std::string(file->path()).c_str(),
+                              static_cast<unsigned long long>(desplazamiento), buffer_length,
+                              bytes_read, result);
+        }
+      }
       if (io_status_block) {
         io_status_block->status = result;
         io_status_block->information = bytes_read;

@@ -9,6 +9,7 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <rex/host_action.h>
 #include <rex/logging.h>
 #include <rex/runtime.h>
 #include <rex/string.h>
@@ -527,6 +528,9 @@ u32 XamShowDeviceSelectorUI_entry(u32 user_index, u32 content_type, u32 content_
 }
 
 void XamShowDirtyDiscErrorUI_entry(u32 user_index) {
+  // Run-071: this entry ends in exit(1) - the guest's disc-read-error death.
+  // Stamp the host-action ring/file so the exit correlates with its trigger.
+  rex::NoteHostAction("XamShowDirtyDiscErrorUI user=%u -> exit(1)", uint32_t(user_index));
   REXKRNL_ERROR("XamShowDirtyDiscErrorUI called! user_index={}", uint32_t(user_index));
   REXKRNL_ERROR("This indicates a disc/file read error - check that all game files exist");
 

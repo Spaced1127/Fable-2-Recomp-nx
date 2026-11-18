@@ -88,21 +88,23 @@ powershell -ExecutionPolicy Bypass -File H:\Projects\Fable2Port\Fable-2-Recomp-n
 ```
 
 The staged package is `H:\Projects\Fable2Port\stage\switch\Fable II`
-(`fable_2.nro`, `fable_2.toml`, `fable2_config.toml`; run-070 NRO hash in
-`docs/RUN_070.md`). The user copies the three files to `E:\switch\Fable II`,
-launches full-memory, and returns the **whole `logs/` folder as-is** (never
-renamed) plus a photo. Read in `fable_2_0NN.log`:
-- `[upload] SKIPPED depth/stencil format` - the ZF32_X24S8 copy that led every
-  fatal batch is now skipped (placeholder); the batch becomes RGBA8 + RGB10A2;
-- `[frame] submit #N carried U upload copy/copies` + `[staging] released ... on
-  the present-fence witness` - staging lifetime is fence-witnessed, never age;
-- `[upload] frame-path readback (presenter poll) ... grid=[...]` - proof the
-  in-frame upload landed (now the first NON-depth upload, RGBA8 480x360);
-- `[guest-readback] #30/#150` - after the fix the fnv1a SHOULD differ (the guest
-  animates once it gets past the boot/static state);
-- `[death-watch]` / `[skip-census]` - kept; the death must not recur within 60 s.
-If the death survives the depth skip, the next discriminators are the RGB10A2
-copies and the first draw that samples an uploaded image (one cvar at a time).
+(`fable_2.nro`, `fable_2.toml`, `fable2_config.toml`; run-071 NRO hash in
+`docs/RUN_071.md`). The user copies the three files to `E:\switch\Fable II`,
+launches full-memory, lets it die (~9.5 s), and returns the **whole `logs/`
+folder as-is INCLUDING `logs/rex/`** (never renamed) plus a photo. Read:
+- `logs/rex/rex_exit_marker.log` - a new `build=m1-f1-071` entry means a hook
+  fired (exit/abort/terminate/data-abort); absent/empty means OS kill;
+- `[gpu-error] queue in ERROR state at present #N` in `fable_2_0NN.log` - GPU
+  channel fault confirmed as the death;
+- `rex_crash.log` NEW blocks (tagged `build: m1-f1-071`) - symbolise their
+  `imagen+0x...` offsets against THIS build's `port/build/fable_2.elf`
+  (NRO offset = ELF vaddr, identity map; addr2line -f -C -e fable_2.elf);
+- `logs/rex/rex_actions.log` + the ring dump in the crash block - the last host
+  actions before the death (upload #, frame submit #, IO failures);
+- `[io] READ SHORT/FAILED` - the guest's disc-read-error trigger chain, if hit.
+Then fix ONLY the named site. If GPU fault: discriminate the fatal frame's
+members one cvar at a time (deko3d_upload_probe_frame, then the RGB10A2 copies,
+then the first sampling draw).
 
 ## Evidence
 
@@ -194,15 +196,15 @@ the 2026-11-15 quiet-mode order in every respect.
 - Persist this for every future session; it replaces the quiet-mode section that
   used to live here.
 
-Last hardware run: **069** (2026-11-18, guest-output surface proven STATIC
-white - fnv1a identical at #30/#150, presenter/copy innocent; one real draw per
-frame, all 24 skips legitimate; death ~100-200 ms after the first upload batch
-is kicked; upload #1 is a ZF32_X24S8 DEPTH copy the RGBA8 proofs never covered).
-Next: run-070 (**staging pinned to frame cohorts, released only on a later
-frame's present-fence witness - never on age; depth/stencil-format uploads
-skipped behind deko3d_upload_skip_depth=true, the death discriminator; probe
-4x4 grid; per-frame upload-copy count at submit**) - built and staged, NRO hash
-in `docs/RUN_070.md`, tag `m1-f1-070`, unverified.
+Last hardware run: **070** (2026-11-18, depth skip confirmed working; death
+UNCHANGED 240 ms after the first colour upload; **the exit() crash block is
+STALE - written by run 057/058; runs 059-070 fired no hook, so the current death
+is a silent OS-level kill, GPU channel fault the prime candidate**). Next:
+run-071 (**name the death, instrumentation only: per-boot exit/abort/terminate
+markers, build-tagged crash blocks, last-host-action ring + per-line file,
+per-present GPU error-state witness, IO read-failure logging; staging cohorts +
+depth skip kept; probe opt-out cvar added**) - built and staged, NRO hash in
+`docs/RUN_071.md`, tag `m1-f1-071`, unverified.
 
 **Run-067 result, in one line:** the copy-only bisect logged `copy fence TIMEOUT
 after up to 1000 ms` for the tiled destination (flags 0x800, size 2949120, align
@@ -220,7 +222,7 @@ the script's argument frame. Detail: `docs/runs/056/` and `docs/RUN_057.md`.
 
 **Run-056 evidence used (parsed, not guessed):** `docs/runs/055/rex_crash.log` is
 `docs/runs/054/rex_crash.log` byte-for-byte with **one block appended** (054
-`A11477CCâ€¦`, 55576 bytes; 055 `DBB147D7â€¦`, 58946 bytes; prefix identical), and
+`A11477CCÃ¢â‚¬Â¦`, 55576 bytes; 055 `DBB147D7Ã¢â‚¬Â¦`, 58946 bytes; prefix identical), and
 the appended block is the `read of guest 0x0`:
 `pc imagen+0x96B688 = sub_821C95D8+0xD8`, instruction `0xB8606A80`
 (`ldr w0,[x20,x0]`, x20 = guest base, x0 = 0). `addr2line` on `fable_2.elf`
@@ -311,7 +313,7 @@ Does not work yet:
 | 043 | 87D32069 | **M1 provenance captured.** Uploads enabled: the 5 s upload timeout fired, the app survived to 43 s and went beyond character selection, then the witness fired - `sub_822358A8 r3=0 lr=82390590 r4=425DDB90`, chain `h=42538C10, i=0` - and the guest violation followed. New crash block (`3C136827...`). The 9 s no-upload death is a separate defect. |
 | 044 | F328F67B | **class named.** `h=42538C10` is a **CECPlayerControl** (type descriptor `820A687C` = deleting destructor `8234E398` + name; ctor `sub_8234E2B0` zeroes `+8`/`+0x64`; writer `sub_8234EC08` called from update loop `sub_825F3050` @ `825F3538`). `+8` and `+0x64` null = instance not yet updated on this path. |
 | 045 | 5EC15850 | **writer never ran.** Tag confirmed, witness fired at 37 s with the same `h`/`+0x64=0`, but **zero** `[gui-writer]` lines: `sub_8234EC08` was never called. The gate is the HUD state machine (below). |
-| 046 | DA31C44B | `[gui-state]` shows state 1â†’2â†’3â†’5 with **flag=1**; case 2 and its flag were reached, yet **no writer**: the update call path is bypassed or targets another object. Witness at 39 s, same `h`, new crash block. |
+| 046 | DA31C44B | `[gui-state]` shows state 1Ã¢â€ â€™2Ã¢â€ â€™3Ã¢â€ â€™5 with **flag=1**; case 2 and its flag were reached, yet **no writer**: the update call path is bypassed or targets another object. Witness at 39 s, same `h`, new crash block. |
 | 047 | D7D6163D | **two instances.** `[gui-upd] self=42220210` (the update target); the draw faults on `42538C10`, reached as `[[42220210+0x24]+4]`. The updated object is in the witness chain; the faulting one is never updated. |
 | 048 | B6D7909E | **pass and update are not coupled.** `[gui-pass]` ran once at 16:09:58 with `self=404BC8A0`; the faulting update ran at 16:10:02 on `42220210` with `w36=40531DC8 idB4=404CF618`, `n24=40531DC8 h2=42538C10 h2+64=0`, chains matching the witness. The pass call's target is `[component+4]` (=404BC8A0), so the pass is a manager-level pass; the later update took a branch that never reaches the pass call at `0x8233F064`. |
 | 049 | F2EB4C2E | **pass path confirmed.** `[gui-mark] pass` at 22.413 (`self=42220210`, `h2=42538C10`, `loop=0`) was the only mark - `wait` never fired; the `[gui-pass]` followed 4 ms later and the update returned 4.1 s after that with `h2+64=0`. The wait loop and the state machine are exonerated; the empty/not-ready UI batch inside the pass is the gate. New crash block `270D8442...`. |
@@ -335,6 +337,7 @@ Does not work yet:
 | 067 | D12DE792 | **copy fence times out, queue is fine - verdict retracted.** Copy-only bisect: tiled destination `flags 0x800 size 2949120 align 512`, derived pitch 4096 B = the rowLength passed, `copy fence TIMEOUT after up to 1000 ms`; pitch-linear destination rejected by deko3d (`size 0`). Then `present-fence SIGNALLED ... at present #1` and 180 presents followed, so the queue executes and the fence mechanism works - which points at the copy submission never reaching the GPU, not at a wedge. **(Mechanism named 2026-11-18: no kickoff until present #1 - the wait ended 52.255, present #1 kicked 52.313; the copy then rode that kick and was harmless. Run-068's waitIdle flushes/kicks and decides.)** |
 | 068 | 537FBBEB | **BREAKTHROUGH: the copy EXECUTES and lands the pattern.** `[copy-sync] A rows: dkQueueWaitIdle RETURNED after 5 ms`, `fence state after WaitIdle = signalled (queue error state: no)`, readback `[5A5A5A5A 5A5A5A5A]`, `verdict EXECUTED`. Descriptor A canonical (rowLength 4096 B, imageHeight 720 rows, flags 0x800 tiled). The 2D engine, descriptor and fence are fine - the submission needed kicking/waiting. "Copy is the killer" DEAD; 057/058/065/067 timeouts were polling/submit artefacts. In-frame probe armed but death 240 ms later pre-empted its readback (fixed in 069: presenter-polled). 180 presents, same ~9.5 s death on a gui_textures.bnk read, crash block unchanged `98A1A23D` - F2 separate, not chased ahead of F1. |
 | 069 | 72D72676 | **F1 measurable; death suspect named.** copy-sync EXECUTED again. `[guest-readback] #30/#150 1280x2048: fnv1a=73F2DDC5 IDENTICAL, first/grid FFFFFFFF, zero=6799360/10485760` - the presented surface is STATIC white: the presenter and copy path are NOT the fault; the guest never drew content into it. Per-frame census: `drew 1, skipped 24`, skip-census `empty=4096 masked=0` - all skips legitimate null draws; one real draw/frame = boot/static-screen state, not a menu. Death ~100-200 ms after the first upload batch is KICKED (uploads #1-4 recorded 37.15-.34, present #156 kicked 37.352, last line 37.449). **Format finding:** upload #1 is xenos 23 = k_24_8_FLOAT -> deko 45 **ZF32_X24S8 (depth)** - the RGBA8-only copy proofs never covered it; #2 deko 28 RGBA8, #3/#4 deko 52 RGB10A2. Depth formats are not a supported 2D-copy destination on Tegra (host-side finding; the API does not reject them - run-070 measures whether skipping them stops the death). Staging retirement did NOT run between upload #4 and death (it only runs on later uploads; there were none) - the age mechanism did not fire this run, but it is a latent bug (could free before a long frame submits) and is replaced by fence-witnessed cohorts in 070. EDRAM transfer (1/run) and depth resolve (1/run) are NOT per-frame blockers - stop treating them as the white-screen cause. |
+| 070 | F9446974 | **Depth skip works; death unchanged; the exit() block is STALE.** `[upload] SKIPPED depth/stencil (xenos 23 -> deko 45)` confirmed; still 158 presents / ~9.3 s, death 240 ms after the first COLOUR upload (480x360 RGBA8). Guest surface still static white (fnv1a=73F2DDC5). **Re-read of rex_crash.log:** 69110 bytes / hash `98A1A23D` frozen since run 058; the logger appends one block per boot with no dedup (it grew 050-058), so runs 059-070 fired NO hook - the `exit() fuera del cierre ordenado` block was written by run 057/058, and the CURRENT death is a silent OS-level kill (GPU channel fault prime candidate), not exit(). Old offsets cannot be symbolised against the current ELF (layout shifted); approximately they land in guest recomp code + VM dispatcher - the OLD exit was guest-triggered via HLE. SDK's only exit() sites: XamShowDirtyDiscErrorUI exit(1) / HalReturnToFirmware exit(0), both log ERROR first; neither line in any recent log. Run-071 instruments: per-boot exit markers, build-tagged crash blocks, last-host-action ring + per-line file, per-present GPU error-state witness, IO read-failure logging. |
 
 ### Run-048 result: break located inside sub_8233EEE0
 
@@ -1012,7 +1015,7 @@ Evidence from the full log history (`docs/runs/history/`):
   presented frame held on the display, not continuous presents. The fatal
   operation is therefore in the non-present phase: render target creation,
   clears, copies/resolves, texture-bank IO - not in a swap.
-- **Free decisive datum, not yet returned:** AtmosphÃ¨re writes its own crash
+- **Free decisive datum, not yet returned:** AtmosphÃƒÂ¨re writes its own crash
   reports to `sd:/atmosphere/crash_reports/` (and `erpt_reports/` when present)
   for exactly this OS-level death. The newest file should name the faulting
   thread, exception type and PC. Requested; it can identify the fault without
@@ -1032,7 +1035,7 @@ Evidence from the full log history (`docs/runs/history/`):
   (`sub_822358A8`) and `sub_82235698` exactly four, all in `sub_822357D0`;
   callers branch to the hook. When the fault is reachable again it will fire.
 
-So the order of gates is: **a below-guest death at ~9 s â†’ no menu frames â†’ no
+So the order of gates is: **a below-guest death at ~9 s Ã¢â€ â€™ no menu frames Ã¢â€ â€™ no
 fault**. Whether that death is the unmatched wait or a GPU/OS kill is the open
 question; M1 cannot be closed until the process survives this point.
 

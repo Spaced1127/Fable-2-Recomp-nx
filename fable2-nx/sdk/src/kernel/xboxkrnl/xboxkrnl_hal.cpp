@@ -13,6 +13,7 @@
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 
 #include <rex/kernel/xboxkrnl/private.h>
+#include <rex/host_action.h>
 #include <rex/logging.h>
 #include <rex/hook.h>
 #include <rex/types.h>
@@ -30,6 +31,8 @@ void HalReturnToFirmware_entry(u32 routine) {
 
   // TODO(benvank): diediedie much more gracefully
   // Not sure how to blast back up the stack in LLVM without exceptions, though.
+  // Run-071: stamp the host-action ring/file so the exit correlates with its trigger.
+  rex::NoteHostAction("HalReturnToFirmware routine=%u -> exit(0)", routine);
   REXKRNL_ERROR("Game requested shutdown via HalReturnToFirmware");
   exit(0);
 }
