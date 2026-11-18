@@ -106,6 +106,14 @@ REXCVAR_DEFINE_BOOL(deko3d_upload_sync_probe, true, "GPU/deko3d",
                     "the full image flags/extent table. Names the illegal copy/image (run-074).")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
+// Run-076: 2x2 source x destination isolation with KNOWN 0x5A content (the old
+// probe's 0x5A verdict was meaningless for real guest data). Names source-vs-
+// destination in one run; strategy stays frozen until the table is in.
+REXCVAR_DEFINE_BOOL(deko3d_copy_matrix, true, "GPU/deko3d",
+                    "At setup: 2x2 copy matrix (setup/texture staging x setup/texture image) "
+                    "with 0x5A content, per-cell flags/extent/readback line (run-076).")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
 // Run-075: re-enabled - with the alignment fix the upload batch should survive,
 // and the readback is the F1 evidence (does the guest output start animating).
 REXCVAR_DEFINE_BOOL(deko3d_guest_readback, true, "GPU/deko3d",
@@ -375,10 +383,12 @@ class Deko3DTextureCache::TextureImpl final : public Texture {
     if (logged_creations < 12) {
       ++logged_creations;
       REXGPU_WARN("[tex-image] created {}x{}x{} (logical) -> {}x{} (aligned w64/h8) fmt={} "
-                  "type={} flags=0x{:X} layout-size={} align={} mem={} gpu=0x{:X}",
+                  "type={} flags=0x{:X} layout-size={} align={} mem={} gpu=0x{:X} offset=0 "
+                  "mem-flags=0x{:X} (GpuCached|Image)",
                   width, height, depth, aligned_width_, aligned_height_, uint32_t(format),
                   uint32_t(type), uint32_t(DkImageFlags_Usage2DEngine), size, alignment,
-                  uint32_t(aligned), uint64_t(image_.getGpuAddr()));
+                  uint32_t(aligned), uint64_t(image_.getGpuAddr()),
+                  uint32_t(DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image));
     }
     return true;
   }
@@ -449,6 +459,12 @@ bool Deko3DTextureCache::Initialize() {
     RunCopyBisect();
   } else {
     REXGPU_WARN("[copy-bisect] gate: deko3d_copy_bisect=false -> skipped");
+  }
+  // Run-076: the 2x2 source x destination isolation (known 0x5A content).
+  if (REXCVAR_GET(deko3d_copy_matrix)) {
+    RunCopyMatrix();
+  } else {
+    REXGPU_WARN("[copy-matrix] gate: deko3d_copy_matrix=false -> skipped");
   }
   {
     const bool want_validate = REXCVAR_GET(deko3d_upload_validate);
@@ -1308,6 +1324,165 @@ bool Deko3DTextureCache::RunCopySyncTest() {
   return true;
 }
 
+// Run-076: the 2x2 source x destination isolation. Run-075 showed alignment
+// was NOT the cause (aligned copies still land zeros), and the old probe's
+// "0x5A" verdict was meaningless for real guest data. This matrix uses KNOWN
+// 0x5A content in both staging kinds, so the readback verdict is decisive:
+//   A setup staging -> setup image        (known PASS control)
+//   B setup staging -> texture-cache image (real CreateTexture path, 480->512)
+//   C texture staging -> setup image
+//   D texture staging -> texture image
+// One line per cell: staging flags/size/gpu, flush policy, DkCopyBuf, rect,
+// destination flags/layout/align/offset/mem-flags, readback bytes, PASS/FAIL.
+// B passes + D fails -> destination; C/D fail + A/B pass -> source staging.
+bool Deko3DTextureCache::RunCopyMatrix() {
+  constexpr uint32_t kPitch = 4096;
+  const uint32_t setup_bytes = kPitch * 720;
+  const uint32_t tex_bytes = (kPitch * 360 + DK_MEMBLOCK_ALIGNMENT - 1) &
+                             ~uint32_t(DK_MEMBLOCK_ALIGNMENT - 1);
+  const uint32_t kStagingFlags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
+  dk::UniqueMemBlock setup_staging = dk::MemBlockMaker{device_.device(), setup_bytes}
+                                         .setFlags(kStagingFlags)
+                                         .create();
+  dk::UniqueMemBlock tex_staging = dk::MemBlockMaker{device_.device(), tex_bytes}
+                                       .setFlags(kStagingFlags)
+                                       .create();
+  if (!setup_staging || !tex_staging) {
+    REXGPU_WARN("[copy-matrix] staging allocation failed");
+    return false;
+  }
+  for (dk::UniqueMemBlock* b : {&setup_staging, &tex_staging}) {
+    auto* p = static_cast<uint8_t*>(b->getCpuAddr());
+    const uint32_t n = b->getSize();
+    std::memset(p, 0, n);
+    for (uint32_t y = 0; y < n / kPitch; ++y) {
+      std::memset(p + size_t(y) * kPitch, 0x5A, 256);
+    }
+  }
+  // Setup image: the exact RunCopySyncTest recipe (960x720 RGBA8, proven PASS).
+  dk::ImageLayout setup_layout;
+  dk::ImageLayoutMaker{device_.device()}
+      .setFlags(DkImageFlags_Usage2DEngine)
+      .setType(DkImageType_2D)
+      .setFormat(DkImageFormat_RGBA8_Unorm)
+      .setDimensions(960, 720, 1)
+      .setMipLevels(1)
+      .initialize(setup_layout);
+  const uint64_t setup_size = setup_layout.getSize();
+  const uint32_t setup_align = setup_layout.getAlignment();
+  dk::UniqueMemBlock setup_mem =
+      dk::MemBlockMaker{device_.device(),
+                        uint32_t((setup_size + setup_align - 1) & ~uint64_t(setup_align - 1))}
+          .setFlags(DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image)
+          .create();
+  dk::Image setup_image{};
+  setup_image.initialize(setup_layout, setup_mem, 0);
+  // Texture image: the REAL texture-cache creation path (CreateTexture ->
+  // TextureImpl::Initialize, which applies the run-075 w64/h8 alignment).
+  TextureKey key;
+  key.MakeInvalid();
+  key.dimension = xenos::DataDimension::k2DOrStacked;
+  key.width_minus_1 = 479;
+  key.height_minus_1 = 359;
+  key.tiled = 1;
+  key.pitch = 480;
+  key.format = xenos::TextureFormat::k_8_8_8_8;
+  key.is_valid = 1;
+  std::unique_ptr<Texture> tex = CreateTexture(key);
+  if (!tex) {
+    REXGPU_WARN("[copy-matrix] CreateTexture failed");
+    return false;
+  }
+  TextureImpl& tex_impl = static_cast<TextureImpl&>(*tex);
+  dk::UniqueMemBlock rb = dk::MemBlockMaker{device_.device(), 4096 * 64}
+                              .setFlags(DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached)
+                              .create();
+  if (!rb) {
+    REXGPU_WARN("[copy-matrix] readback allocation failed");
+    return false;
+  }
+  auto cell = [&](const char* name, dk::UniqueMemBlock& staging, uint32_t rows,
+                  dk::Image& image, uint32_t rect_w, uint32_t rect_h,
+                  uint64_t layout_size, uint32_t layout_align) {
+    DkCopyBuf src{};
+    src.addr = staging.getGpuAddr();
+    src.rowLength = kPitch;
+    src.imageHeight = rows;
+    dk::ImageView view{image};
+    view.setMipLevels(0, 1);
+    const DkImageRect rect{0, 0, 0, rect_w, rect_h, 1};
+    upload_command_buffer_.clear();
+    upload_command_buffer_.addMemory(upload_command_memory_, 0, kUploadCommandSize);
+    upload_command_buffer_.copyBufferToImage(src, view, rect);
+    upload_command_buffer_.barrier(DkBarrier_Full, DkInvalidateFlags_Image |
+                                                       DkInvalidateFlags_Descriptors |
+                                                       DkInvalidateFlags_L2Cache);
+    const DkCmdList list = upload_command_buffer_.finishList();
+    dk::Fence fence{};
+    {
+      std::lock_guard lock(device_.submit_mutex());
+      device_.queue().submitCommands(list);
+      device_.queue().signalFence(fence, true);
+      device_.queue().flush();
+    }
+    NoteGpuSubmit();
+    const bool idle = BoundedQueueWaitIdle(device_.queue(), name, 2000);
+    const bool fence_ok = fence.wait(0) == DkResult_Success;
+    const bool err = device_.queue().isInErrorState();
+    std::memset(rb.getCpuAddr(), 0xAA, 4096 * 64);
+    upload_command_buffer_.clear();
+    upload_command_buffer_.addMemory(upload_command_memory_, 0, kUploadCommandSize);
+    upload_command_buffer_.barrier(DkBarrier_Full, DkInvalidateFlags_Image);
+    DkCopyBuf back{};
+    back.addr = rb.getGpuAddr();
+    back.rowLength = 4096;
+    back.imageHeight = 64;
+    const DkImageRect read_rect{0, 0, 0, 64, 64, 1};
+    upload_command_buffer_.copyImageToBuffer(view, read_rect, back, 0);
+    const DkCmdList rb_list = upload_command_buffer_.finishList();
+    {
+      std::lock_guard lock(device_.submit_mutex());
+      device_.queue().submitCommands(rb_list);
+      device_.queue().flush();
+    }
+    NoteGpuSubmit();
+    BoundedQueueWaitIdle(device_.queue(), "matrix readback", 2000);
+    auto* p = static_cast<uint8_t*>(rb.getCpuAddr());
+    const bool pass = p[0] == 0x5A && p[1] == 0x5A;
+    REXGPU_WARN("[copy-matrix] {}: staging flags=0x{:X} (CpuUncached|GpuCached) size={} "
+                "gpu=0x{:X} flush=none(uncached write-through) | copy{{addr=0x{:X}, "
+                "rowLength={}, imageHeight={}}} rect={}x{} | dest flags=0x800 "
+                "layout-size={} align={} offset=0 mem-flags=0x{:X} (GpuCached|Image) | "
+                "idle={} fence={} err={} | readback [{:02X}{:02X}{:02X}{:02X} "
+                "{:02X}{:02X}{:02X}{:02X}] -> {}",
+                name, uint32_t(kStagingFlags), staging.getSize(),
+                uint64_t(staging.getGpuAddr()), uint64_t(src.addr), src.rowLength,
+                src.imageHeight, rect_w, rect_h, layout_size, layout_align,
+                uint32_t(DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image), idle, fence_ok,
+                err, p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7],
+                pass ? "PASS" : "FAIL");
+    rex::NoteHostAction("copy-matrix %s %s", name, pass ? "PASS" : "FAIL");
+    return pass;
+  };
+  const bool a = cell("A setup-staging->setup-image", setup_staging, 720, setup_image, 960, 720,
+                      setup_size, setup_align);
+  const bool b = cell("B setup-staging->tex-image", setup_staging, 360, tex_impl.image(),
+                      tex_impl.aligned_width(), tex_impl.aligned_height(),
+                      tex_impl.layout_size(), tex_impl.layout_align());
+  const bool c = cell("C tex-staging->setup-image", tex_staging, 360, setup_image, 960, 360,
+                      setup_size, setup_align);
+  const bool d = cell("D tex-staging->tex-image", tex_staging, 360, tex_impl.image(),
+                      tex_impl.aligned_width(), tex_impl.aligned_height(),
+                      tex_impl.layout_size(), tex_impl.layout_align());
+  REXGPU_WARN("[copy-matrix] verdict: A={} B={} C={} D={} -> {}", a ? "PASS" : "FAIL",
+              b ? "PASS" : "FAIL", c ? "PASS" : "FAIL", d ? "PASS" : "FAIL",
+              (a && b && !c && !d) ? "SOURCE staging at fault"
+                  : (a && !b && c && !d) ? "DESTINATION tex-image at fault"
+                      : (a && b && c && d) ? "both legal in isolation - fault is frame context"
+                          : "mixed - see per-cell values");
+  return a && b && c && d;
+}
+
 std::unique_ptr<TextureCache::Texture> Deko3DTextureCache::CreateTexture(TextureKey key) {
   DkImageFormat format;
   if (!GetDekoImageFormat(key.format, format)) {
@@ -1573,6 +1748,27 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
                 aligned_w, aligned_h, aligned_h % 8, aligned_w % 64, source_pitch,
                 aligned_blocks_high, src_extent, staging_size,
                 deko_texture.layout_size() >= uint64_t(aligned_w) * aligned_h * 4 ? "yes" : "NO");
+    // Run-076: the staging holds DECODED GUEST DATA, not 0x5A - the old probe's
+    // "pattern" verdict was meaningless. Name the source content CPU-side first:
+    // if staging is zero here, the guest mirror pages are empty and no copy can
+    // land pixels - a source-data fault, not a copy fault.
+    {
+      auto* sp = static_cast<uint8_t*>(staging->getCpuAddr());
+      uint32_t nz = 0;
+      for (uint32_t i = 0; i < 4096 && i < staging_size; ++i) {
+        if (sp[i]) ++nz;
+      }
+      REXGPU_WARN("[upload-sync] probe #{} SOURCE staging CPU-side: first bytes "
+                  "[{:02X}{:02X}{:02X}{:02X} {:02X}{:02X}{:02X}{:02X}], {} non-zero of "
+                  "first 4096 (flags=0x{:X}, {})",
+                  sync_probes, sp[0], sp[1], sp[2], sp[3], sp[4], sp[5], sp[6], sp[7], nz,
+                  uint32_t(staging_uncached ? (DkMemBlockFlags_CpuUncached |
+                                               DkMemBlockFlags_GpuCached)
+                                            : (DkMemBlockFlags_CpuCached |
+                                               DkMemBlockFlags_GpuCached)),
+                  staging_uncached ? "CpuUncached, no flush needed"
+                                   : "CpuCached, FlushCpuRange called before submit");
+    }
     upload_command_buffer_.clear();
     upload_command_buffer_.addMemory(upload_command_memory_, 0, kUploadCommandSize);
     DkCopyBuf probe_src{};
@@ -1638,19 +1834,24 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
       NoteGpuSubmit();
       BoundedQueueWaitIdle(device_.queue(), "readback", 2000);
       auto* rb = static_cast<uint8_t*>(probe_rb.getCpuAddr());
-      pattern = rb[0] == 0x5A && rb[1] == 0x5A;
+      uint32_t nz = 0;
+      for (uint32_t i = 0; i < 4096 * 64; ++i) {
+        if (rb[i] != 0 && rb[i] != 0xAA) ++nz;
+      }
+      pattern = nz != 0;
       REXGPU_WARN("[upload-sync] probe #{} {}x{} deko{}: readback first bytes "
-                  "[{:02X}{:02X}{:02X}{:02X} {:02X}{:02X}{:02X}{:02X}]",
+                  "[{:02X}{:02X}{:02X}{:02X} {:02X}{:02X}{:02X}{:02X}], {} non-zero/non-pre-fill "
+                  "bytes of 262144 (guest data, NOT a 0x5A pattern)",
                   sync_probes, width, height, uint32_t(deko_texture.format()), rb[0], rb[1],
-                  rb[2], rb[3], rb[4], rb[5], rb[6], rb[7]);
+                  rb[2], rb[3], rb[4], rb[5], rb[6], rb[7], nz);
     }
     REXGPU_WARN("[upload-sync] probe #{} {}x{} deko{}: verdict {} (fence={}, queue error=no)",
                 sync_probes, width, height, uint32_t(deko_texture.format()),
-                pattern ? "PASS - copy legal on this image"
-                        : "FAIL - copy ran but the pattern did not land",
+                pattern ? "DATA LANDED - the copy wrote guest bytes"
+                        : "ALL ZERO - source empty or copy wrote nothing (see SOURCE line)",
                 fence_ok);
     rex::NoteHostAction("upload-sync probe #%u %s %ux%u deko%u", sync_probes,
-                        pattern ? "PASS" : "FAIL", width, height,
+                        pattern ? "DATA-LANDED" : "ALL-ZERO", width, height,
                         uint32_t(deko_texture.format()));
     // The copy executed synchronously: bindable under the delay rule now.
     deko_texture.set_upload_cohort(FrameSubmitEpoch());

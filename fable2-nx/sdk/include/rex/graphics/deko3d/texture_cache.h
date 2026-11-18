@@ -95,6 +95,7 @@ class Deko3DTextureCache final : public TextureCache {
   bool RunCopyDiagnostic();
   bool RunCopyBisect();
   bool RunCopySyncTest();
+  bool RunCopyMatrix();
 
   ui::deko3d::Deko3DDevice& device_;
   dk::UniqueCmdBuf upload_command_buffer_;
