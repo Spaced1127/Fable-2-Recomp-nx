@@ -36,6 +36,8 @@ void NoteHostActionFast(const char* fmt, ...);
 // Chronological dump of the ring into out (NUL-terminated). Returns bytes
 // written. Safe to call from the crash logger (no locks).
 size_t DumpHostActions(char* out, size_t cap);
+// Same, but only the last `count` entries (for periodic log lines).
+size_t DumpHostActionsLast(char* out, size_t cap, size_t count);
 
 // Build identity for the crash blocks and the marker file (set once at startup).
 void SetHostActionBuildTag(const char* tag);

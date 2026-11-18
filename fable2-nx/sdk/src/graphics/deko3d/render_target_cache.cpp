@@ -357,6 +357,20 @@ bool Deko3DRenderTargetCache::Flush() {
   const uint32_t upload_copies = TakeFrameUploadCopyCount();
   rex::NoteHostActionFast("frame submit #%llu upload-copies=%u",
                           static_cast<unsigned long long>(FrameSubmitEpoch()), upload_copies);
+  // Run-072: GPU error witness on the render thread too - the presenter's
+  // per-present check can be pre-empted by the OS kill (single thread does both
+  // recording and presenting). A fault here names the frame that carried it.
+  if (device_.queue().isInErrorState()) {
+    static bool logged_gpu_error_flush = false;
+    if (!logged_gpu_error_flush) {
+      logged_gpu_error_flush = true;
+      REXGPU_WARN("[gpu-error] queue in ERROR state at frame submit #{} ({} upload copies) - "
+                  "GPU channel faulted; OS kill expected",
+                  FrameSubmitEpoch(), upload_copies);
+      rex::NoteHostAction("gpu-error at frame submit #%llu",
+                          static_cast<unsigned long long>(FrameSubmitEpoch()));
+    }
+  }
   if (upload_copies) {
     static uint32_t logged_frame_uploads = 0;
     ++logged_frame_uploads;

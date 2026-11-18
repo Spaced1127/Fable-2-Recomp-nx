@@ -14,12 +14,13 @@ F5 HARDWARE - the packaged build boots and renders on the real Switch.
 **F1 OPEN** (copy PROVEN executing (068); guest-output surface PROVEN static white (069) -
 the guest draws 1 static frame, never menu content; fault is upstream of the presenter.
 Depth-format upload skip + staging cohorts in run-070 pending)
-| **F2 OPEN** (death ~200 ms after the first upload batch is kicked; depth skip did NOT stop it;
-the exit() crash block is STALE (run 057/058) - runs 059-070 fire no hook, so the current death is a
-silent OS kill, GPU channel fault prime candidate; run-071 instruments the exit/error witnesses)
+| **F2 OPEN** (death FIXED ~9.3 s regardless of uploads - uploads are a symptom of guest progress,
+not the cause; run-071: no GPU error, no hook fired; exit() block stale (057/058); run-072 wraps
+every exit path (svcExitProcess/__libnx_exit/_exit/_Exit/exit/__assert_func) + verifies the
+guest-visible short-read status)
 | **F3 OPEN** (guest stuck in boot/static-screen state; VM-nil crash ~50 s when survival allows)
 | **F4 OPEN** (guest input works; menu not yet visible)
-| **F5 PARTIAL** (packages boot on real Switch, screen static white) - last hardware run: 070.
+| **F5 PARTIAL** (packages boot on real Switch, screen static white) - last hardware run: 071.
 
 ## Autonomy contract (user-set)
 

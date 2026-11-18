@@ -52,14 +52,15 @@ void Fable2App::OnPreSetup(rex::RuntimeConfig& config) {
   // Build identity for hardware logs. The NRO hash cannot be baked in here
   // (a rebuild changes it), so the tag names the build family and the runner
   // verifies the hash with Get-FileHash. Warn so it is flushed at once.
-  REXLOG_WARN("[fable2] build tag: m1-f1-071 "
-              "(name the death: exit/abort/terminate markers per boot, crash blocks carry the "
-              "build tag + last-host-action ring, per-present GPU error-state witness, IO read "
-              "failures logged; staging cohorts + depth skip kept)");
+  REXLOG_WARN("[fable2] build tag: m1-f1-072 "
+              "(hook EVERY exit path: --wrap svcExitProcess/__libnx_exit/_exit/_Exit/exit/"
+              "__assert_func with caller stacks; guest-visible short-read status logged; "
+              "death-watch dumps last host actions; GPU error witness at frame submit and "
+              "post-kick; staging cohorts + depth skip kept)");
   // Run-071: stamp the crash blocks / marker file with this build's identity, so
   // stale blocks (the exit() record dates to runs 057/058) cannot be mistaken
   // for the current death.
-  RexSetCrashBuildTag("m1-f1-071");
+  RexSetCrashBuildTag("m1-f1-072");
   // Proves which witnesses this binary carries: run 059's log had no
   // [vm-lookup] line and could not say whether the hook was missing or had simply
   // not been reached before the process died.

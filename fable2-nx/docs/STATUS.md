@@ -88,23 +88,25 @@ powershell -ExecutionPolicy Bypass -File H:\Projects\Fable2Port\Fable-2-Recomp-n
 ```
 
 The staged package is `H:\Projects\Fable2Port\stage\switch\Fable II`
-(`fable_2.nro`, `fable_2.toml`, `fable2_config.toml`; run-071 NRO hash in
-`docs/RUN_071.md`). The user copies the three files to `E:\switch\Fable II`,
-launches full-memory, lets it die (~9.5 s), and returns the **whole `logs/`
+(`fable_2.nro`, `fable_2.toml`, `fable2_config.toml`; run-072 NRO hash in
+`docs/RUN_072.md`). The user copies the three files to `E:\switch\Fable II`,
+launches full-memory, lets it die (~9.3 s), and returns the **whole `logs/`
 folder as-is INCLUDING `logs/rex/`** (never renamed) plus a photo. Read:
-- `logs/rex/rex_exit_marker.log` - a new `build=m1-f1-071` entry means a hook
-  fired (exit/abort/terminate/data-abort); absent/empty means OS kill;
-- `[gpu-error] queue in ERROR state at present #N` in `fable_2_0NN.log` - GPU
-  channel fault confirmed as the death;
-- `rex_crash.log` NEW blocks (tagged `build: m1-f1-071`) - symbolise their
-  `imagen+0x...` offsets against THIS build's `port/build/fable_2.elf`
-  (NRO offset = ELF vaddr, identity map; addr2line -f -C -e fable_2.elf);
-- `logs/rex/rex_actions.log` + the ring dump in the crash block - the last host
-  actions before the death (upload #, frame submit #, IO failures);
-- `[io] READ SHORT/FAILED` - the guest's disc-read-error trigger chain, if hit.
-Then fix ONLY the named site. If GPU fault: discriminate the fatal frame's
-members one cvar at a time (deko3d_upload_probe_frame, then the RGB10A2 copies,
-then the first sampling draw).
+- `rex_crash.log` NEW blocks tagged `build: m1-f1-072` - the reason names the
+  exit path (`svcExitProcess` / `__libnx_exit(N)` / `_exit(N)` / `_Exit(N)` /
+  `exit(N) call site` / `__assert_func: file:line`); symbolise the `imagen+0x...`
+  frames against THIS build's `port/build/fable_2.elf` (identity map;
+  addr2line -f -C). Fix ONLY that site.
+- `[io] SHORT READ guest-visible` - iosb.status/info + returned status + APC
+  for the legal EOF short reads; iosb.status != 0 there = the guest is handed a
+  failure -> fix the status/count path first.
+- `[gpu-error]` at frame submit / post-kick / present - GPU channel fault.
+- `[death-watch] last host actions` - the last reads/uploads in the MAIN log
+  even when no hook fires (external OS kill); the ring carries the last 10+
+  file outcomes with guest-visible statuses.
+If still nothing fires: external OS kill, no channel error - next suspects are
+guest allocation failure at that load, a missing asset treated as fatal, or an
+XDK error return treated as fatal.
 
 ## Evidence
 
@@ -196,15 +198,14 @@ the 2026-11-15 quiet-mode order in every respect.
 - Persist this for every future session; it replaces the quiet-mode section that
   used to live here.
 
-Last hardware run: **070** (2026-11-18, depth skip confirmed working; death
-UNCHANGED 240 ms after the first colour upload; **the exit() crash block is
-STALE - written by run 057/058; runs 059-070 fired no hook, so the current death
-is a silent OS-level kill, GPU channel fault the prime candidate**). Next:
-run-071 (**name the death, instrumentation only: per-boot exit/abort/terminate
-markers, build-tagged crash blocks, last-host-action ring + per-line file,
-per-present GPU error-state witness, IO read-failure logging; staging cohorts +
-depth skip kept; probe opt-out cvar added**) - built and staged, NRO hash in
-`docs/RUN_071.md`, tag `m1-f1-071`, unverified.
+Last hardware run: **071** (2026-11-18, **no GPU error, no hook fired, death
+FIXED ~9.3 s with or without uploads** - uploads are a symptom of the guest
+progress point, not the cause; action log dominated by legal EOF short reads
+with st=0). Next: run-072 (**hook EVERY exit path: --wrap svcExitProcess /
+__libnx_exit / _exit / _Exit / exit / __assert_func with caller stacks;
+guest-visible short-read status logged per read; death-watch dumps last host
+actions into the main log; GPU error checks at frame submit + post-kick**) -
+built and staged, NRO hash in `docs/RUN_072.md`, tag `m1-f1-072`, unverified.
 
 **Run-067 result, in one line:** the copy-only bisect logged `copy fence TIMEOUT
 after up to 1000 ms` for the tiled destination (flags 0x800, size 2949120, align
@@ -338,6 +339,7 @@ Does not work yet:
 | 068 | 537FBBEB | **BREAKTHROUGH: the copy EXECUTES and lands the pattern.** `[copy-sync] A rows: dkQueueWaitIdle RETURNED after 5 ms`, `fence state after WaitIdle = signalled (queue error state: no)`, readback `[5A5A5A5A 5A5A5A5A]`, `verdict EXECUTED`. Descriptor A canonical (rowLength 4096 B, imageHeight 720 rows, flags 0x800 tiled). The 2D engine, descriptor and fence are fine - the submission needed kicking/waiting. "Copy is the killer" DEAD; 057/058/065/067 timeouts were polling/submit artefacts. In-frame probe armed but death 240 ms later pre-empted its readback (fixed in 069: presenter-polled). 180 presents, same ~9.5 s death on a gui_textures.bnk read, crash block unchanged `98A1A23D` - F2 separate, not chased ahead of F1. |
 | 069 | 72D72676 | **F1 measurable; death suspect named.** copy-sync EXECUTED again. `[guest-readback] #30/#150 1280x2048: fnv1a=73F2DDC5 IDENTICAL, first/grid FFFFFFFF, zero=6799360/10485760` - the presented surface is STATIC white: the presenter and copy path are NOT the fault; the guest never drew content into it. Per-frame census: `drew 1, skipped 24`, skip-census `empty=4096 masked=0` - all skips legitimate null draws; one real draw/frame = boot/static-screen state, not a menu. Death ~100-200 ms after the first upload batch is KICKED (uploads #1-4 recorded 37.15-.34, present #156 kicked 37.352, last line 37.449). **Format finding:** upload #1 is xenos 23 = k_24_8_FLOAT -> deko 45 **ZF32_X24S8 (depth)** - the RGBA8-only copy proofs never covered it; #2 deko 28 RGBA8, #3/#4 deko 52 RGB10A2. Depth formats are not a supported 2D-copy destination on Tegra (host-side finding; the API does not reject them - run-070 measures whether skipping them stops the death). Staging retirement did NOT run between upload #4 and death (it only runs on later uploads; there were none) - the age mechanism did not fire this run, but it is a latent bug (could free before a long frame submits) and is replaced by fence-witnessed cohorts in 070. EDRAM transfer (1/run) and depth resolve (1/run) are NOT per-frame blockers - stop treating them as the white-screen cause. |
 | 070 | F9446974 | **Depth skip works; death unchanged; the exit() block is STALE.** `[upload] SKIPPED depth/stencil (xenos 23 -> deko 45)` confirmed; still 158 presents / ~9.3 s, death 240 ms after the first COLOUR upload (480x360 RGBA8). Guest surface still static white (fnv1a=73F2DDC5). **Re-read of rex_crash.log:** 69110 bytes / hash `98A1A23D` frozen since run 058; the logger appends one block per boot with no dedup (it grew 050-058), so runs 059-070 fired NO hook - the `exit() fuera del cierre ordenado` block was written by run 057/058, and the CURRENT death is a silent OS-level kill (GPU channel fault prime candidate), not exit(). Old offsets cannot be symbolised against the current ELF (layout shifted); approximately they land in guest recomp code + VM dispatcher - the OLD exit was guest-triggered via HLE. SDK's only exit() sites: XamShowDirtyDiscErrorUI exit(1) / HalReturnToFirmware exit(0), both log ERROR first; neither line in any recent log. Run-071 instruments: per-boot exit markers, build-tagged crash blocks, last-host-action ring + per-line file, per-present GPU error-state witness, IO read-failure logging. |
+| 071 | D55CA595 | **No GPU error, NO hook fired, death FIXED ~9.3 s regardless of uploads.** death-watch 32/64/96/128/160 all `gpu error state=no`; no rex_exit_marker entry, no new crash block, no terminate/abort. Uploads start ~8.4 s because the guest streams GUI assets then - a SYMPTOM of the guest progress point, not the cause. rex_actions dominated by legal EOF short reads (`st=0`, got<req). Host-side: file layer returns SUCCESS+real count for short reads (END_OF_FILE only on true failure); NtReadFile writes iosb.status/info, queues APC, returns PENDING for async - chain looks correct, guest-visible logging added in 072. Static audit: every known exit site logs first (ERROR/INFO+flush) and none appeared; xmemory _Exit(4) needs 2000 heap failures (none); TerminateTitle only ends guest threads. So: a path bypassing ALL logging (direct svcExitProcess/_exit) or an external OS kill. Run-072 wraps svcExitProcess/__libnx_exit/_exit/_Exit/exit/__assert_func with caller stacks, logs guest-visible short-read status, dumps last actions in death-watch, adds GPU error checks at frame submit + post-kick. |
 
 ### Run-048 result: break located inside sub_8233EEE0
 

@@ -60,6 +60,10 @@ if(NOT TARGET rexglue_switch_startup)
         "${CMAKE_CURRENT_LIST_DIR}/../src/ui/runtime_switch.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/../src/ui/switch_elf_stubs.c"
         "${CMAKE_CURRENT_LIST_DIR}/../src/ui/switch_crash_hooks.c"
+        # Run-072: --wrap hooks for every deliberate exit path (_exit/_Exit,
+        # __libnx_exit, svcExitProcess, exit, __assert_func) - the silent death
+        # bypassed the atexit/abort hooks; these name its call site.
+        "${CMAKE_CURRENT_LIST_DIR}/../src/ui/switch_exit_wraps.c"
         "${CMAKE_CURRENT_LIST_DIR}/../src/ui/switch_perf.cpp"
         # FPS and resolution for the console overlays (SaltyNX) and Reverse-NX reading.
         "${CMAKE_CURRENT_LIST_DIR}/../src/ui/switch_saltynx.cpp"
@@ -75,7 +79,9 @@ if(NOT TARGET rexglue_switch_startup)
         "LINKER:--wrap=nvFenceWait,--wrap=nvGpuChannelKickoff,--wrap=nvMapCreate"
         "LINKER:--wrap=nvAddressSpaceAllocFixed,--wrap=nvioctlNvhostAsGpu_MapBufferEx"
         "LINKER:--wrap=armDCacheClean,--wrap=nwindowQueueBuffer,--wrap=bqDequeueBuffer"
-        "LINKER:--wrap=svcSleepThread")
+        "LINKER:--wrap=svcSleepThread"
+        "LINKER:--wrap=svcExitProcess,--wrap=__libnx_exit,--wrap=_exit,--wrap=_Exit"
+        "LINKER:--wrap=exit,--wrap=__assert_func")
 endif()
 
 function(rexglue_switch_configure_target target_name)

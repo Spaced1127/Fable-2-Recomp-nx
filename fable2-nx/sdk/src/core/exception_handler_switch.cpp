@@ -476,9 +476,10 @@ void NoteHostActionFast(const char* fmt, ...) {
   va_end(ap);
 }
 
-size_t DumpHostActions(char* out, size_t cap) {
+size_t DumpHostActionsLast(char* out, size_t cap, size_t count) {
   const uint64_t total = g_host_action_seq.load(std::memory_order_acquire);
-  const uint64_t first = total > 16 ? total - 16 : 0;
+  const uint64_t window = count < 16 ? count : 16;
+  const uint64_t first = total > window ? total - window : 0;
   size_t off = 0;
   for (uint64_t s = first + 1; s <= total && off + 1 < cap; ++s) {
     const HostActionSlot& slot = g_host_actions[(s - 1) % 16];
@@ -490,6 +491,8 @@ size_t DumpHostActions(char* out, size_t cap) {
   }
   return off;
 }
+
+size_t DumpHostActions(char* out, size_t cap) { return DumpHostActionsLast(out, cap, 16); }
 
 void SetHostActionBuildTag(const char* tag) {
   std::snprintf(g_crash_build_tag, sizeof(g_crash_build_tag), "%s", tag ? tag : "?");

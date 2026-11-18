@@ -669,9 +669,30 @@ Presenter::PaintResult Deko3DPresenter::PaintAndPresentImpl(bool execute_ui_draw
                   impl_->present_count, rex::graphics::deko3d::TextureUploadCount(),
                   impl_->present_cmd_slot, queue.isInErrorState() ? "YES" : "no");
       impl_->device->LogMemory("death-watch");
+      // Run-072: the last host actions in the MAIN log too - a silent OS kill
+      // fires no hook, so the ring would otherwise never be dumped. This leaves
+      // the last reads/uploads named even when nothing else writes.
+      char actions[768];
+      if (rex::DumpHostActionsLast(actions, sizeof(actions), 3)) {
+        REXLOG_WARN("[death-watch] last host actions:\n{}", actions);
+      }
     }
   }
   queue.presentImage(impl_->swapchain, slot);
+  // Run-072: presentImage just kicked the channel (the frame's render list,
+  // upload copies and the present copy). The error check at the TOP of the next
+  // present can be missed entirely if the OS kill lands first (single-threaded
+  // present + recording), so check again right after the kick.
+  if (queue.isInErrorState()) {
+    static bool logged_gpu_error_post = false;
+    if (!logged_gpu_error_post) {
+      logged_gpu_error_post = true;
+      REXLOG_WARN("[gpu-error] queue in ERROR state right after present #{} kick - GPU channel "
+                  "faulted on this frame's work; OS kill expected",
+                  impl_->present_count);
+      rex::NoteHostAction("gpu-error right after present #%u kick", impl_->present_count);
+    }
+  }
   return PaintResult::kPresented;
 }
 
