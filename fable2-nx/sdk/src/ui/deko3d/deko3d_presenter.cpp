@@ -14,6 +14,7 @@
 
 #include <array>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <mutex>
 
@@ -76,11 +77,131 @@ struct Deko3DPresenter::Impl {
   // queue that had never run anything could not answer.
   dk::Fence present_fence{};
   uint32_t present_fence_at = 0;
-  uint32_t present_fence_result = 0;  // 0 = pending, 1 = signalled, 2 = never
+  uint32_t present_fence_result = 0;  // 0 = pending, 1 = signalled (telemetry only)
   uint32_t present_fence_delay = 0;
   uint32_t refresh_epoch = 0;
   uint32_t present_at_last_refresh = 0;
   std::chrono::steady_clock::time_point last_refresh{};
+  // Run-069 (F1): read the guest output image the present copy reads from, at
+  // present 30 and 150, and print checksum + sample grid + blank/content verdict.
+  // Own cmdbuf/mem (never aliases the present-copy slots); CpuUncached readback
+  // so the CPU reads DRAM, not its own dirty 0xAA pre-fill (run-068 lesson).
+  dk::UniqueCmdBuf readback_cmdbuf;
+  dk::UniqueMemBlock readback_cmd_mem;
+  dk::UniqueMemBlock readback_mem;
+  uint32_t guest_readbacks_done = 0;
+
+  // Run-069 (F1): read back the guest output image the present copy reads from
+  // (the branch=1 surface) and print a checksum, an 8x8 sample grid and an
+  // explicit blank/content verdict. Uniform clear colour -> the guest never drew
+  // into it (fault upstream in draw/target binding); varying content -> the
+  // present copy/swapchain is at fault. Called from PaintAndPresentImpl AFTER
+  // the frame's render list and the present copy are submitted, so queue order
+  // makes these the exact pixels the present copy reads. The caller already
+  // holds device->submit_mutex() - do NOT take it again here.
+  void ReadBackGuestOutputLocked(dk::Queue queue, uint32_t present_number) {
+    const uint32_t w = guest_target_width;
+    const uint32_t h = guest_target_height;
+    if (!w || !h) {
+      return;
+    }
+    const uint32_t row_bytes = w * 4;  // the resolved front buffer is RGBA8
+    const uint64_t bytes = uint64_t(row_bytes) * h;
+    const uint32_t mem_size = uint32_t((bytes + DK_MEMBLOCK_ALIGNMENT - 1) &
+                                       ~uint64_t(DK_MEMBLOCK_ALIGNMENT - 1));
+    if (!readback_mem) {
+      readback_cmdbuf = dk::CmdBufMaker{device->device()}.create();
+      readback_cmd_mem =
+          dk::MemBlockMaker{device->device(), kCmdSize}
+              .setFlags(DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached)
+              .create();
+      readback_mem =
+          dk::MemBlockMaker{device->device(), mem_size}
+              .setFlags(DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached)
+              .create();
+      if (!readback_cmdbuf || !readback_cmd_mem || !readback_mem) {
+        REXLOG_WARN("[guest-readback] allocation failed - no verdict this run");
+        return;
+      }
+      std::memset(readback_mem.getCpuAddr(), 0xAA, mem_size);
+    }
+    if (bytes > readback_mem.getSize()) {
+      REXLOG_WARN("[guest-readback] #{}: target {}x{} outgrew the readback block - skipped",
+                  present_number, w, h);
+      return;
+    }
+    readback_cmdbuf.clear();
+    readback_cmdbuf.addMemory(readback_cmd_mem, 0, kCmdSize);
+    readback_cmdbuf.barrier(DkBarrier_Full, DkInvalidateFlags_Image);
+    dk::ImageView src_view{guest_target_image};
+    DkCopyBuf dst{};
+    dst.addr = readback_mem.getGpuAddr();
+    dst.rowLength = row_bytes;
+    dst.imageHeight = h;
+    const DkImageRect rect{0, 0, 0, w, h, 1};
+    readback_cmdbuf.copyImageToBuffer(src_view, rect, dst, 0);
+    const DkCmdList list = readback_cmdbuf.finishList();
+    dk::Fence fence{};
+    queue.submitCommands(list);
+    queue.signalFence(fence, true);
+    queue.flush();  // kick now: the readback must not wait for the next present
+    rex::graphics::deko3d::NoteGpuSubmit();
+    if (fence.wait(250000000) != DkResult_Success) {
+      REXLOG_WARN("[guest-readback] #{}: fence TIMEOUT (250 ms) - pixels NOT trustworthy, "
+                  "no verdict", present_number);
+      return;
+    }
+    const uint8_t* p = static_cast<const uint8_t*>(readback_mem.getCpuAddr());
+    uint32_t fnv = 2166136261u;
+    uint8_t min_b = 0xFF, max_b = 0x00;
+    uint64_t zero_bytes = 0;
+    for (uint64_t i = 0; i < bytes; ++i) {
+      fnv ^= p[i];
+      fnv *= 16777619u;
+      if (p[i] < min_b) min_b = p[i];
+      if (p[i] > max_b) max_b = p[i];
+      if (!p[i]) ++zero_bytes;
+    }
+    uint32_t samples[8][8];
+    for (uint32_t gy = 0; gy < 8; ++gy) {
+      for (uint32_t gx = 0; gx < 8; ++gx) {
+        const uint32_t x = gx * w / 8 + w / 16;
+        const uint32_t y = gy * h / 8 + h / 16;
+        const uint8_t* px = p + (uint64_t(y) * row_bytes) + x * 4;
+        samples[gy][gx] = uint32_t(px[0]) | (uint32_t(px[1]) << 8) |
+                          (uint32_t(px[2]) << 16) | (uint32_t(px[3]) << 24);
+      }
+    }
+    uint32_t distinct = 0;
+    for (uint32_t i = 0; i < 64; ++i) {
+      bool seen = false;
+      for (uint32_t j = 0; j < i; ++j) {
+        if (samples[i / 8][i % 8] == samples[j / 8][j % 8]) { seen = true; break; }
+      }
+      if (!seen) ++distinct;
+    }
+    char grid[8 * 8 * 9 + 8];
+    size_t off = 0;
+    for (uint32_t gy = 0; gy < 8; ++gy) {
+      for (uint32_t gx = 0; gx < 8; ++gx) {
+        off += size_t(std::snprintf(grid + off, sizeof(grid) - off, "%08X ", samples[gy][gx]));
+      }
+      if (gy < 7) grid[off++] = '|';
+    }
+    grid[off] = '\0';
+    const char* verdict =
+        min_b == max_b
+            ? "BLANK - the whole surface is one uniform byte value: the guest never drew into "
+              "it (fault upstream in draw/target binding)"
+            : (distinct >= 2
+                   ? "CONTENT - the guest output has varying pixels: if the screen is blank the "
+                     "fault is in the present copy / swapchain blit"
+                   : "NEAR-BLANK - bytes vary but the 8x8 grid is uniform; inspect the grid");
+    REXLOG_WARN("[guest-readback] #{} {}x{}: fnv1a={:08X} min={:02X} max={:02X} zero={}/{} "
+                "first=[{:02X}{:02X}{:02X}{:02X} {:02X}{:02X}{:02X}{:02X}] grid=[{}] verdict={}",
+                present_number, w, h, fnv, min_b, max_b, zero_bytes, bytes,
+                p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], grid, verdict);
+  }
 
   void ResetLocked() {
     if (device) {
@@ -328,52 +449,35 @@ Presenter::PaintResult Deko3DPresenter::PaintAndPresentImpl(bool execute_ui_draw
   if (appletGetFocusState() != AppletFocusState_InFocus) {
     return PaintResult::kNotPresented;
   }
-  // Run-059: no copy fence, no wait.
-  //
-  // Run 058's boot self-test settled the primitive: `fence-only` - a signal on an
-  // EMPTY command list - also times out, so dkFenceWait never observes a signal on
-  // this stack. The old 2 s wait here therefore never returned "signalled": it
-  // either held the frame for two seconds or (after the fix in run 054) presented
-  // anyway. Now the copy and the present are submitted back to back and the
-  // display is never gated on a fence; deko3d's swapchain acquire/present is what
-  // paces the frame, exactly as it does for the pattern.
-  //
-  // Frame pacing consequence, stated so it is not mistaken for a bug: without the
-  // wait the frame loop can outrun the display, and `acquireImage` blocks instead.
-  // Every present is logged below with its slot, source branch and the age of the
-  // guest image, so the log shows whether the swapchain follows each guest frame.
-  // Run-063: the present copy's fence DOES signal here (run 062 observed it one
-  // frame after submission), so the slot is now waited on - bounded at 250 ms and
-  // named, which is the exact answer rather than a policy. A timed-out wait is
-  // logged and the frame still presents (a lost signal must not freeze the
-  // display).
-  if (impl_->present_count > 0 && impl_->present_fence_result != 2) {
+  // Run-069: bounded wait on the previous frame's present fence, every frame.
+  // Run 068 proved fences signal in ~5 ms once the submission is kicked
+  // (presentImage flushes), so this wait returns promptly and paces the frame;
+  // the old permanent give-up ("NOT signalled after 60 presents -> never wait
+  // again") rested on the retracted "fences never signal" artefact and is
+  // deleted. A timeout is logged and the frame still presents - a lost signal
+  // must not freeze the display.
+  if (impl_->present_count > 0) {
     static rex::graphics::deko3d::FenceWaitStats present_wait_stats;
     if (rex::graphics::deko3d::WaitFenceForRetirement(impl_->present_fence, "present copy",
                                                       present_wait_stats)) {
       rex::graphics::deko3d::NoteFramePresented();
-    } else {
-      // Falls through: presenting anyway is correct, the fence is only pacing.
     }
   }
 
-  // Poll the present fence from the previous frame: no wait, ever.
+  // One-shot telemetry: the first present whose fence is observed signalled.
   if (impl_->present_fence_result == 0 && impl_->present_count > 0) {
     if (impl_->present_fence.wait(0) == DkResult_Success) {
-      rex::graphics::deko3d::NoteFramePresented();
       impl_->present_fence_result = 1;
       impl_->present_fence_delay = impl_->present_count - impl_->present_fence_at;
       REXLOG_WARN("[present-fence] SIGNALLED on the render queue at present #{} ({} frame(s) "
                   "after the copy was submitted) - fences work on this queue",
                   impl_->present_count, impl_->present_fence_delay);
-    } else if (impl_->present_count - impl_->present_fence_at > 60 &&
-               impl_->present_fence_result == 0) {
-      impl_->present_fence_result = 2;
-      REXLOG_WARN("[present-fence] NOT signalled after {} presents on the render queue - the "
-                  "queue executes (frames advance) but dkFenceWait never observes it",
-                  impl_->present_count - impl_->present_fence_at);
     }
   }
+
+  // Run-069: print the frame-path upload probe as soon as its witness allows,
+  // independent of whether any later upload or texture-binding draw happens.
+  rex::graphics::deko3d::PollFrameUploadProbe();
   std::lock_guard dev_lock(impl_->device->submit_mutex());
   dk::Queue queue = impl_->device->queue();
   {
@@ -449,6 +553,13 @@ Presenter::PaintResult Deko3DPresenter::PaintAndPresentImpl(bool execute_ui_draw
     rex::graphics::deko3d::NoteGpuSubmit();
     queue.signalFence(impl_->present_fence, true);
     impl_->present_fence_at = impl_->present_count;
+    // Run-069 (F1): at present 30 and 150, read back this exact source image -
+    // the decisive blank/content question, answered with pixels, not inference.
+    const uint32_t upcoming = impl_->present_count + 1;
+    if ((upcoming == 30 || upcoming == 150) && impl_->guest_readbacks_done < 2) {
+      ++impl_->guest_readbacks_done;
+      impl_->ReadBackGuestOutputLocked(queue, upcoming);
+    }
   } else if (has_gpu_output) {
     const uint32_t copy_width =
         impl_->guest_width < impl_->width ? impl_->guest_width : impl_->width;
@@ -532,6 +643,15 @@ Presenter::PaintResult Deko3DPresenter::PaintAndPresentImpl(bool execute_ui_draw
     REXLOG_WARN("[present] #{} slot={} branch={} guest#{} age={} since_refresh={}ms {}x{}",
                 impl_->present_count, slot, branch_log, impl_->refresh_epoch, age, since_ms,
                 impl_->guest_width, impl_->guest_height);
+    // Run-069 death-watch: the ~9.5 s below-guest death writes no crash block, so
+    // a periodic line names the last stage (uploads done, present slot) and the
+    // memory left; the log tail then says what was in flight when it died.
+    if ((impl_->present_count % 32) == 0) {
+      REXLOG_WARN("[death-watch] present #{}: texture uploads so far={}, present cmd slot={}",
+                  impl_->present_count, rex::graphics::deko3d::TextureUploadCount(),
+                  impl_->present_cmd_slot);
+      impl_->device->LogMemory("death-watch");
+    }
   }
   queue.presentImage(impl_->swapchain, slot);
   return PaintResult::kPresented;

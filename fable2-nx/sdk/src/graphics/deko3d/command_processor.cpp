@@ -1433,6 +1433,25 @@ bool Deko3DCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
 
   uint32_t color_target_count = 0;
   if (!BindRenderTargets(*command_buffer, normalized_color_mask, color_target_count)) {
+    // Run-069 (F1): census the 540/run no_render_targets skips by class, decided
+    // from the registers, not from base==0 (EDRAM base 0 is legitimate). EMPTY =
+    // normalized color mask 0 and no z/stencil: nothing to write, a legitimate
+    // null draw (Xenia skips these too). MASKED = the draw claims writes but the
+    // resolver bound nothing: the prime suspect for a blank guest output, dumped
+    // in full on its first occurrence.
+    const bool writes_nothing = !normalized_color_mask &&
+                                !normalized_depth_control.z_enable &&
+                                !normalized_depth_control.stencil_enable;
+    static uint32_t empty_skips = 0, masked_skips = 0;
+    if (writes_nothing) {
+      ++empty_skips;
+    } else {
+      ++masked_skips;
+    }
+    if ((empty_skips + masked_skips) % 128 == 0) {
+      REXGPU_WARN("[skip-census] no_render_targets: empty(mask0/no-z)={} masked(claims-writes)={}",
+                  empty_skips, masked_skips);
+    }
     char detail[320];
     detail[0] = '\0';
     if (DescribeSkipSoon("no_render_targets")) {
@@ -1456,6 +1475,34 @@ bool Deko3DCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
                     int(normalized_depth_control.z_enable), int(normalized_depth_control.stencil_enable),
                     color_info.color_base, int(color_info.color_format), depth_info.depth_base,
                     int(rb_surface_info_raw.surface_pitch), int(rb_surface_info_raw.msaa_samples));
+    }
+    if (!writes_nothing && masked_skips == 1) {
+      // Full register dump of the first MASKED skip: the resolver's inputs and
+      // what it concluded, so the reason nothing bound is decided from registers.
+      uint32_t used = 0;
+      for (uint32_t i = 0; i <= xenos::kMaxColorRenderTargets; ++i) {
+        if (render_target_cache_->GetUsedRenderTarget(i)) ++used;
+      }
+      REXGPU_WARN(
+          "[skip-dump] MASKED no_render_targets #1: RB_COLOR_INFO[0..3]={:08X} {:08X} {:08X} "
+          "{:08X}, RB_DEPTH_INFO={:08X}, RB_SURFACE_INFO={:08X}, RB_COLOR_MASK={:08X}, "
+          "RB_COLORCONTROL={:08X}, RB_DEPTHCONTROL={:08X}, PA_SC_SCREEN_SCISSOR_TL={:08X} "
+          "BR={:08X}, PA_SC_WINDOW_OFFSET={:08X}, PA_SU_SC_MODE_CNTL={:08X}; normalized "
+          "mask=0x{:X} z={} stencil={}; resolver used targets={} (rt0 base 0 is a legitimate "
+          "EDRAM base - the mask, not the base, decides)",
+          regs[reg::RB_COLOR_INFO::rt_register_indices[0]],
+          regs[reg::RB_COLOR_INFO::rt_register_indices[1]],
+          regs[reg::RB_COLOR_INFO::rt_register_indices[2]],
+          regs[reg::RB_COLOR_INFO::rt_register_indices[3]],
+          regs[reg::RB_DEPTH_INFO::register_index], regs[reg::RB_SURFACE_INFO::register_index],
+          regs[reg::RB_COLOR_MASK::register_index], regs[reg::RB_COLORCONTROL::register_index],
+          regs[reg::RB_DEPTHCONTROL::register_index],
+          regs[reg::PA_SC_SCREEN_SCISSOR_TL::register_index],
+          regs[reg::PA_SC_SCREEN_SCISSOR_BR::register_index],
+          regs[reg::PA_SC_WINDOW_OFFSET::register_index],
+          regs[reg::PA_SU_SC_MODE_CNTL::register_index], normalized_color_mask,
+          int(normalized_depth_control.z_enable), int(normalized_depth_control.stencil_enable),
+          used);
     }
     return DrawSkipped("no_render_targets", detail);
   }

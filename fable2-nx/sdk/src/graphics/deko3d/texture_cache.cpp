@@ -26,63 +26,36 @@
 #include <rex/ui/deko3d/deko3d_device.h>
 
 REXCVAR_DEFINE_BOOL(deko3d_texture_upload, false, "GPU/deko3d",
-                    "Upload guest textures with the 2D engine. Off by default because a "
-                    "copyBufferToImage into a self-created image stalls this hardware's queue "
-                    "permanently, with a page-aligned block, a 16-byte-aligned source pitch "
-                    "padded to 4096 bytes and a plain RGBA8 format all already excluded - so "
-                    "every texture samples the white placeholder until the copy path is "
-                    "replaced. Turn on to reproduce the stall.")
+                    "Upload guest textures with the 2D engine. Run 068 proved the copy EXECUTES "
+                    "and lands the pattern (descriptor A: rowLength bytes, imageHeight rows, "
+                    "Usage2DEngine tiled); the old 'stalls the queue permanently' claim was the "
+                    "missing-kickoff artefact and is retracted. Off by default in code; the "
+                    "staged fable_2.toml pins it true for the F1 runs.")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
-// Run-056 diagnostic: a 64x64 one-shot copyBufferToImage self-test run once at
-// boot, before the guest submits any GPU work. Each variant is one shape of the
-// real upload with a single difference, has its own fence and is bounded, and
-// the log says which completed. A variant that never signals wedges the shared
-// queue for the rest of the session (that is what the real first upload does),
-// so the order below is deliberate - see RunUploadProbe.
-//
-// Run-057: defaults to TRUE. Run-056's log had no probe lines at all and the
-// gate could not be told apart from a missing toml key, so the probe now runs
-// unless it is explicitly switched off, and the gate's value is logged either
-// way. Set false in fable_2.toml to skip it.
-// Run-061: the boot round-trip validation (one 64x64 copy there and back,
-// byte-compared). On by default - it is the only thing that can prove the copy
-// shape, and it costs ~50 ms of boot.
-REXCVAR_DEFINE_BOOL(deko3d_upload_validate, true, "GPU/deko3d",
-                    "Run the 64x64 copy validation inside the frame loop (submitted with the "
-                    "first real texture, read back by age). Never blocks and never gates boot: "
-                    "run 061 hung boot forever in dkQueueWaitIdle here.")
+// Historical probes (RunUploadProbe / RunCopyDiagnostic / RunCopyBisect) are
+// retired as verdict sources: their "fence never signals" / "copy fails"
+// results were the missing-kickoff artefact (run 068 correction - see
+// fence_wait.h). They remain opt-in for A/B only. The live proof is the
+// frame-path upload probe (presenter-polled) and the guest-output readback.
+REXCVAR_DEFINE_BOOL(deko3d_upload_validate, false, "GPU/deko3d",
+                    "Retired run-065 a-d standalone copy diagnostic (its FAIL verdicts were the "
+                    "missing-kickoff artefact, corrected by run 068). Off by default; the "
+                    "frame-path upload probe is unconditional and presenter-polled instead.")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 REXCVAR_DEFINE_BOOL(deko3d_upload_probe, false, "GPU/deko3d",
-                    "Run the upload self-test at boot: a fence-only control, a clear-only "
-                    "control, then five 64x64 copyBufferToImage shapes, each bound to 1 s and "
-                    "all of them always attempted. Default OFF since run 059: its verdict is "
-                    "in (the fence never signals, see fence_wait.h) and the seven 1 s bounds "
-                    "only delay boot.")
+                    "Retired boot self-test (fence-only/clear-only controls + five copy shapes). "
+                    "Its run-058 'fence primitive dead' verdict was the missing-kickoff artefact "
+                    "(run 068 correction). Off by default; opt-in A/B only.")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
-// Run-058: upload without waiting for the copy's fence.
-//
-// Run 057 showed the probe's copy fence timing out while the renderer kept
-// advancing frames (frame 0 at 23:56:58.392, frame 127 at 23:57:03.524) - the
-// 2D-engine copy did not stop the queue, its *fence* never signalled. The
-// presenter already lives with this: it submits the present copy, presents
-// immediately, and only looks at the copy fence on the next frame with a bound,
-// proceeding anyway.
-//
-// So the texture upload now does the same: submit, never wait, and keep the
-// staging block alive until its fence is observed (polled with a zero timeout
-// on later uploads). Queue order already guarantees the copy precedes every
-// draw that samples the image; only the staging lifetime needs the fence, and a
-// bounded number of blocks is kept for the sessions where fences never signal.
-// Run-064: the only 2D-engine operations that complete on this stack are
-// image->image (the presenter's blit). Every buffer->image copy hangs, and the one
-// thing all of them share is a CPU-CACHED staging block as the DMA source. A
-// CpuCached block may not be readable by the 2D engine here (no cache-coherent
-// DMA from that pool), which would explain a copy that never completes while the
-// queue around it keeps running. Uncached staging is write-through, so it also
-// removes the flush from the equation.
+// Upload protocol: submit (flushed), never wait, retire staging by fence or
+// present-age. Queue order guarantees the copy precedes every draw that samples
+// the image; only the staging lifetime needs the fence. (The run-057/064
+// premises - "the copy's fence never signals", "CpuCached staging hangs the 2D
+// engine" - are retracted by run 068: the copies execute and land the pattern
+// once kicked; uncached staging is kept because it needs no CPU flush.)
 // Run-067: the copy-vs-sample bisect, run at command-processor setup - before the
 // first frame - with one REAL upload's parameters (960x720, xenos format 23 ->
 // RGBA8, tiled, as upload #1 in run 066). It answers "does the copy alone kill the
@@ -109,14 +82,15 @@ REXCVAR_DEFINE_BOOL(deko3d_copy_bisect, false, "GPU/deko3d",
 
 REXCVAR_DEFINE_BOOL(deko3d_upload_staging_uncached, true, "GPU/deko3d",
                     "Use a CPU-uncached staging block as the source of the 2D-engine upload copy "
-                    "(run-064 hypothesis: CpuCached staging makes copyBufferToImage hang). Set "
-                    "false to A/B the old cached staging.")
+                    "(writes go straight to DRAM, no flush needed; the run-064 'CpuCached hangs "
+                    "the copy' hypothesis is superseded by the run-068 kickoff finding). Set "
+                    "false to A/B cached staging + flush.")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 REXCVAR_DEFINE_BOOL(deko3d_upload_no_wait, true, "GPU/deko3d",
-                    "Upload textures without waiting for the copy fence (presenter-style). "
-                    "Set false for the old 5 s bounded wait, which stalls the command "
-                    "processor for five seconds per texture when the fence does not signal.")
+                    "Upload textures without waiting for the copy fence (presenter-style); the "
+                    "submit is flushed so the fence signals and retires staging. Set false for "
+                    "a bounded wait per texture (fences signal in ~5 ms once kicked - run 068).")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 namespace rex::graphics::deko3d {
@@ -125,10 +99,12 @@ namespace {
 
 constexpr uint32_t kUploadCommandSize = 64 << 10;
 
-// Run-067: the frame-path upload probe, hoisted so a DRAW can drive its readback.
-// In run 066 the probe was armed but the process died ~250 ms later, before the
-// next upload re-checked it; draws happen every frame, so checking here means the
-// pixels print as soon as the witness allows.
+// Run-069: the frame-path upload probe. The readback rides the FIRST frame-list
+// upload (recorded after its copy, same list), and the PRESENTER polls it every
+// present - run 068 armed it but death came 240 ms later, before any later
+// upload or texture-binding draw re-checked it, so the pixels never printed.
+// The block is CpuUncached: with CpuCached the CPU reads its own dirty 0xAA
+// pre-fill lines even when the GPU wrote the image (the run-068 lesson).
 struct FrameProbe {
   dk::UniqueMemBlock block;
   bool armed = false;
@@ -136,6 +112,37 @@ struct FrameProbe {
   uint64_t present_epoch = 0;
 };
 FrameProbe g_frame_probe;
+
+}  // namespace
+
+// Called by the presenter on every present: prints the frame-path upload's
+// readback once two presents have passed the frame that carried it (the queue
+// is in-order and the present kick has executed it by then). Non-blocking.
+void PollFrameUploadProbe() {
+  if (!g_frame_probe.armed || g_frame_probe.done || !g_frame_probe.block) {
+    return;
+  }
+  if (PresentEpoch() < g_frame_probe.present_epoch + 2) {
+    return;
+  }
+  g_frame_probe.done = true;
+  auto* bytes = static_cast<uint8_t*>(g_frame_probe.block.getCpuAddr());
+  uint32_t changed = 0;
+  for (uint32_t i = 0; i < 4096 * 8; ++i) {
+    if (bytes[i] != 0xAA) {
+      ++changed;
+    }
+  }
+  REXGPU_WARN("[upload] frame-path readback (presenter poll): {} of the first 32768 bytes "
+              "differ from the 0xAA pre-fill; first bytes [{:02X}{:02X}{:02X}{:02X} "
+              "{:02X}{:02X}{:02X}{:02X}] - {}",
+              changed, bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6],
+              bytes[7],
+              changed ? "the frame-recorded upload LANDED pixels"
+                      : "still the pre-fill - the frame-recorded copy produced nothing");
+}
+
+namespace {
 
 bool GetDekoImageFormat(xenos::TextureFormat format, DkImageFormat& format_out) {
   switch (GetBaseFormat(format)) {
@@ -348,14 +355,10 @@ void Deko3DTextureCache::Shutdown() {
   upload_command_memory_ = nullptr;
 }
 
-// Run-056: the upload self-test.
-//
-// The first real texture upload of every run since 034 submits a
-// copyBufferToImage and its fence never signals: uploads are disabled, the
-// queue stays wedged, and every later present copy times out ("giving up on
-// render recording"), which is the white screen. Block page alignment, copy
-// shape (BCn / 16-byte pitch), a 4096-byte padded pitch and plain RGBA8 have
-// already been excluded, so five shapes are measured here instead of guessing:
+// Run-056: the upload self-test. RETIRED as a verdict source (run 068): the
+// "fence never signals / queue wedged" premise below was the missing-kickoff
+// artefact plus the run-060 imageHeight-units bug, both corrected. Kept opt-in
+// for A/B only; the shapes it measures are listed for reference:
 //
 //   1 control-presenter-flags  the presenter's own image creation (render +
 //                              present + 2D engine + hw compression) - the only
@@ -1301,9 +1304,9 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
 
   // The size must be a whole number of pages: deko3d allocates the block from
   // the GPU memory pool at page granularity, and a copy that reads past the end
-  // of the mapped region does not report an error - it stalls the queue with the
-  // fence never signaling (measured: the first texture upload of the first real
-  // frame wedged the graphics queue permanently).
+  // of the mapped region is an invalid DMA. (The run-034 "permanent wedge" was
+  // the imageHeight-units bug - 2.9M rows instead of 720 - fixed in run 061;
+  // run 068 proved the corrected descriptor executes and lands the pattern.)
   // Round the block to whole pages as well as covering the padded pitch.
   const uint32_t staging_size =
       (staging_bytes + DK_MEMBLOCK_ALIGNMENT - 1) & ~uint32_t(DK_MEMBLOCK_ALIGNMENT - 1);
@@ -1368,6 +1371,7 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
   // race.
   static uint32_t upload_index = 0;
   ++upload_index;
+  NoteTextureUpload();
   if (upload_index <= 24) {
     REXGPU_WARN("[upload] #{} {}x{} format {} -> deko {} ({} bytes staging, tiled {}, {} layers)",
                 upload_index, width, height, uint32_t(key.format),
@@ -1377,10 +1381,13 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
   }
 
   // Run-066: record into the FRAME's command list when the command processor can
-  // give us one. Run 065 proved a list submitted on its own never reaches the GPU
-  // here (even buffer->buffer), while the frame list demonstrably does - so the
-  // upload rides the frame list and executes by construction. The separate
-  // immediate-submit path below survives only as the fallback.
+  // give us one: the frame's presentImage kicks the channel, so the copy executes
+  // with the frame. Run-068 correction: run 065's "standalone lists never reach
+  // the GPU" was a missing-kickoff artefact (submitCommands/signalFence only
+  // append GPFIFO entries; only flush/presentImage/waitIdle kick) - the copy
+  // itself EXECUTES and lands the pattern (descriptor A: rowLength in bytes,
+  // imageHeight in rows). The immediate-submit path below survives as the
+  // fallback and now flushes explicitly so its fence can signal.
   dk::CmdBuf* frame_cmdbuf = frame_recorder_ ? frame_recorder_() : nullptr;
   if (frame_cmdbuf) {
     DkCopyBuf to_image{};
@@ -1420,7 +1427,7 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
     if (!g_frame_probe.armed && frame_recorded == 1) {
       g_frame_probe.armed = true;
       g_frame_probe.block = dk::MemBlockMaker{device_.device(), 4096 * 64}
-                        .setFlags(DkMemBlockFlags_CpuCached | DkMemBlockFlags_GpuCached)
+                        .setFlags(DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached)
                         .create();
       if (g_frame_probe.block) {
         std::memset(g_frame_probe.block.getCpuAddr(), 0xAA, 4096 * 64);
@@ -1438,27 +1445,10 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
         REXGPU_WARN("[upload] probe armed: {}x{} of the first frame-path upload will be read back",
                     pw, ph);
       }
-    } else if (g_frame_probe.armed && !g_frame_probe.done && g_frame_probe.block) {
-      const bool ready = PresentEpoch() >= g_frame_probe.present_epoch + 2;
-      if (!ready) {
-        return true;
-      }
-      g_frame_probe.done = true;
-      auto* bytes = static_cast<uint8_t*>(g_frame_probe.block.getCpuAddr());
-      bool patched = false;
-      for (uint32_t i = 0; i < 4096 * 8; ++i) {
-        if (bytes[i] != 0xAA) {
-          patched = true;
-          break;
-        }
-      }
-      REXGPU_WARN("[upload] frame-path readback: {} first bytes [{:02X}{:02X}{:02X}{:02X} "
-                  "{:02X}{:02X}{:02X}{:02X}] - {}",
-                  patched ? "NON-ZERO" : "still the 0xAA pre-fill", bytes[0], bytes[1], bytes[2],
-                  bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
-                  patched ? "the frame-recorded upload landed pixels"
-                          : "the frame-recorded copy still produced nothing");
     }
+    // Run-069: the readback is printed by PollFrameUploadProbe(), called from the
+    // presenter on every present - not by a later upload (run 068: death came
+    // 240 ms after arming, before any later upload could check it).
     return true;
   }
 
@@ -1488,13 +1478,12 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
   // guarantee they see the new texels.
   upload_command_buffer_.barrier(DkBarrier_Full, DkInvalidateFlags_Image);
   DkCmdList list = upload_command_buffer_.finishList();
-  // Run-058: presenter-style submit. Run 057 showed that a 2D-engine copy whose
-  // fence never signals does NOT stop the queue (frames kept advancing), and
-  // that the 5 s bounded wait is itself what stalls the command processor for
-  // five seconds per texture. So the upload now mirrors the presenter: submit,
-  // do not wait, and only use the fence to know when the staging block can be
-  // recycled. Queue order already orders the copy before every draw that samples
-  // the image, so no wait is needed for correctness.
+  // Presenter-style submit: submit, do not wait, use the fence only to know when
+  // the staging block can be recycled. Queue order orders the copy before every
+  // draw that samples the image, so no wait is needed for correctness. (The old
+  // "the copy's fence never signals" premise is retracted - run 068: fences
+  // signal in ~5 ms once the submission is kicked; the timeouts were unfetched
+  // GPFIFO entries, not dead fences.)
   static std::vector<std::unique_ptr<dk::UniqueMemBlock>> deferred_staging;
   static std::vector<std::unique_ptr<dk::Fence>> deferred_fences;
   // Submit epoch of each block's copy (run-060 age-based retirement).
@@ -1519,23 +1508,13 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
     return true;
   }
 
-  // Run-062: the copy validation rides along with real uploads - submitted once
-  // with the first one, read back by age later. It never waits.
-  if (REXCVAR_GET(deko3d_upload_validate)) {
-    static bool diagnostic_done = false;
-    if (!diagnostic_done) {
-      diagnostic_done = true;
-      RunCopyDiagnostic();
-    }
-  }
+  // Run-069: RunCopyDiagnostic (the run-065 a-d standalone probes) is retired -
+  // its FAIL verdicts were the missing-kickoff artefact, corrected by run 068's
+  // EXECUTED. The function stays for opt-in A/B only; nothing calls it by default.
 
-  // Run-060/061: retire by FENCE when the primitive is proven, by AGE otherwise.
-  //
-  // A staging block must outlive the copy that reads it. Run 061's step-0 probe
-  // decides which mechanism is honest: if an empty-list fence signalled in the
-  // clean boot process, fences work and a bounded wait is the accurate answer
-  // (age is only a heuristic); if not, the age rule keeps the pipeline moving
-  // without ever blocking. Either way nothing blocks the frame loop for long.
+  // Retire by FENCE (primary - run 068 proved fences signal once kicked), by
+  // present-age (the queue is in-order, so two presents past the copy's frame
+  // mean it executed), or by submit-age as the last-resort bound.
   constexpr uint64_t kStagingRetireEpochs = 64;  // last resort only
   static FenceWaitStats retire_fence_stats;
   const uint64_t now_present = PresentEpoch();
@@ -1543,10 +1522,10 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
   std::atomic_thread_fence(std::memory_order_acquire);
   const uint64_t now_epoch = GpuSubmitEpoch();
   for (size_t i = deferred_fences.size(); i-- > 0;) {
-    // Run-064: the copy's own fence has never reported, so the PRESENT fence is
-    // the witness: once two frames later have been presented, that copy has been
-    // executed by the in-order queue and the block can be freed. Age 64 is only a
-    // last-resort bound so the list cannot grow without limit.
+    // The copy's own fence is primary (it signals once the submit is kicked);
+    // the present age is the in-order witness: once two frames later have been
+    // presented, the copy has executed and the block can be freed. Age 64 is only
+    // a last-resort bound so the list cannot grow without limit.
     const bool fence_done =
         deferred_fences[i] &&
         PollFence(*deferred_fences[i], "texture staging", retire_fence_stats);
@@ -1563,8 +1542,8 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
   }
   if (deferred_staging.size() >= kMaxDeferred) {
     upload_stopped_ = true;
-    REXGPU_WARN("deko3d: {} texture staging blocks still in flight (the copy fence never "
-                "signals on this stack); further textures will sample the placeholder",
+    REXGPU_WARN("deko3d: {} texture staging blocks still in flight (retirement not keeping "
+                "up); further textures will sample the placeholder",
                 uint32_t(deferred_staging.size()));
     return false;
   }
@@ -1574,6 +1553,10 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
     std::lock_guard lock(device_.submit_mutex());
     device_.queue().submitCommands(list);
     device_.queue().signalFence(*fence, true);
+    // Run-069: kick the channel. submitCommands/signalFence only append GPFIFO
+    // entries; without this flush the copy (and its fence) sit unfetched until
+    // the next presentImage - the run-058/065/067 "fence never signals" artefact.
+    device_.queue().flush();
   }
   deferred_staging.push_back(std::move(staging));
   deferred_fences.push_back(std::move(fence));
@@ -1592,24 +1575,8 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
 
 bool Deko3DTextureCache::GetBoundTexture(uint32_t fetch_constant, bool want_signed,
                                          BoundTexture& out) {
-  // Run-067: print the frame-path probe from the draw path, so a death a quarter of
-  // a second after the upload cannot pre-empt it.
-  if (g_frame_probe.armed && !g_frame_probe.done && g_frame_probe.block &&
-      PresentEpoch() >= g_frame_probe.present_epoch + 2) {
-    g_frame_probe.done = true;
-    auto* bytes = static_cast<uint8_t*>(g_frame_probe.block.getCpuAddr());
-    bool patched = false;
-    for (uint32_t i = 0; i < 4096 * 8; ++i) {
-      if (bytes[i] != 0xAA) {
-        patched = true;
-        break;
-      }
-    }
-    REXGPU_WARN("[upload] frame-path readback (from a draw): {} first bytes "
-                "[{:02X}{:02X}{:02X}{:02X} {:02X}{:02X}{:02X}{:02X}]",
-                patched ? "NON-ZERO" : "still the 0xAA pre-fill", bytes[0], bytes[1], bytes[2],
-                bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]);
-  }
+  // Run-069: the frame-path probe is printed by PollFrameUploadProbe() from the
+  // presenter (every present), which survives even when no draw binds a texture.
   out = BoundTexture();
   if (!REXCVAR_GET(deko3d_texture_upload)) {
     // No texture is ever uploaded, so bind the draw path's white placeholder for

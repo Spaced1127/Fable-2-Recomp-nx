@@ -11,11 +11,12 @@ F5 HARDWARE - the packaged build boots and renders on the real Switch.
 
 ## Status line (keep current)
 
-**F1 OPEN** (copy executes only when the channel is kicked; run-068 sync test pending hardware)
-| **F2 OPEN** (~10 s below-guest death, all runs 059-067)
+**F1 OPEN** (run-068 PROVED the 2D copy executes and lands the pattern - descriptor A
+canonical; the blank-screen question is now the guest-output readback, run-069 pending)
+| **F2 OPEN** (~9.5 s below-guest death, all runs 059-068, crash block unchanged; instrumented)
 | **F3 OPEN** (menu draws, no pixels; VM-nil crash ~50 s when survival allows)
 | **F4 OPEN** (guest input works; menu not yet visible)
-| **F5 PARTIAL** (packages boot on real Switch, screen blank) - last hardware run: 067.
+| **F5 PARTIAL** (packages boot on real Switch, screen blank) - last hardware run: 068.
 
 ## Autonomy contract (user-set)
 

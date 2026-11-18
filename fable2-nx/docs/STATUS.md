@@ -50,11 +50,28 @@ no fault information).
   primitive dead" (058) and "the standalone submit path never reaches the GPU"
   (065) as hardware claims: both are the same missing-kickoff artifact. Run-068's
   `waitIdle` witness flushes/kicks, so its verdict is trustworthy.
+- **RUN-068 HARDWARE PROOF (2026-11-18, `docs/runs/068/`):** the copy EXECUTES and
+  lands the pattern. `[copy-sync] A rows: dkQueueWaitIdle RETURNED after 5 ms`,
+  `fence state after WaitIdle = signalled (queue error state: no)`, readback
+  `first pixels [5A5A5A5A 5A5A5A5A]`, `verdict EXECUTED`. Descriptor A is
+  canonical: rowLength 4096 BYTES, imageHeight 720 ROWS, flags 0x800
+  (Usage2DEngine), tiled. The 2D engine, the descriptor and the fence are all
+  fine - the submission just needed to be kicked/waited properly. "The copy is
+  the killer" is DEAD. The ~9.5 s below-guest death is UNCHANGED (180 presents,
+  gui_textures.bnk read, crash block `98A1A23D` identical) and is a separate
+  defect (F2), not chased ahead of F1.
 
-## The one open question
+## The open question (F1) - the copy question is ANSWERED
 
-**Does that single 960x720 buffer->image copy execute - EXECUTED / DROPPED /
-WEDGED?** Run 068 answers it synchronously at setup and its verdict is not yet in.
+Run 068: **EXECUTED** - the 2D copy lands the pattern (see the hardware proof
+above). The question now is the BLANK SCREEN: does the guest output image the
+presenter copies from (the 1280x720 branch=1 surface) contain pixels, or is it a
+uniform clear? Run 069 reads it back at present 30 and 150 and prints checksum +
+8x8 sample grid + an explicit BLANK/CONTENT verdict. Uniform -> the guest never
+drew into it (fault upstream in draw/target binding; the 540/run
+`no_render_targets` skips are the prime suspect - run 069 censuses them by class
+and dumps the first MASKED skip's registers in full). Content -> the present
+copy / swapchain blit is at fault.
 
 ## Exact next action
 
@@ -67,21 +84,17 @@ powershell -ExecutionPolicy Bypass -File H:\Projects\Fable2Port\Fable-2-Recomp-n
 ```
 
 The staged package is `H:\Projects\Fable2Port\stage\switch\Fable II`
-(`fable_2.nro`, `fable_2.toml`, `fable2_config.toml`; run-068 NRO hash in
-`docs/RUN_068.md` - the revised build supersedes `7370D155...`). The user
-copies the three files to `E:\switch\Fable II`, launches full-memory, and returns
-the **whole `logs/` folder as-is** (never renamed) plus a photo. Read
-`[copy-sync]` lines in `fable_2_0NN.log`: descriptor A only (rows; B/bytes and
-C/tight are opt-in via `deko3d_copy_sync_extra` - B is the run-060 OS-kill DMA if
-it executes, so it stays off) - the recorded list/cmdbuf/source, fence state
-before and after `dkQueueWaitIdle` with its timing and the queue error state,
-the 64x64 pixels (readback block is CpuUncached so the CPU cannot read its own
-dirty 0xAA pre-fill), and the `EXECUTED / DROPPED / WEDGED` verdict. Then branch:
-EXECUTED -> the copy is legal and the ~250 ms death is the draw that samples the
-uploaded image (bisect the descriptor/sampler with a 64x64 target); DROPPED -> the
-command never reaches the GPU even though WaitIdle returns (chase submission and
-command memory, see run 066's `[submit]` addresses); WEDGED -> only then pursue
-copy legality (flags, tiling, tile-aligned rect, units).
+(`fable_2.nro`, `fable_2.toml`, `fable2_config.toml`; run-069 NRO hash in
+`docs/RUN_069.md`). The user copies the three files to `E:\switch\Fable II`,
+launches full-memory, and returns the **whole `logs/` folder as-is** (never
+renamed) plus a photo. Read in `fable_2_0NN.log`:
+- `[upload] frame-path readback (presenter poll)` - the in-frame upload's pixels
+  (probe now presenter-polled every present, CpuUncached block; run 068 armed it
+  but death came 240 ms later before any later upload/draw checked it);
+- `[guest-readback] #30/#150 ... verdict=BLANK/CONTENT` - the decisive F1 answer;
+- `[skip-census]` / `[skip-dump] MASKED` - why draws skip for want of targets;
+- `[death-watch]` - last stage + memory at the ~9.5 s death (F2, instrumented,
+  not chased ahead of F1).
 
 ## Evidence
 
@@ -173,13 +186,15 @@ the 2026-11-15 quiet-mode order in every respect.
 - Persist this for every future session; it replaces the quiet-mode section that
   used to live here.
 
-Last hardware run: **067** (2026-11-18, copy-only bisect: copy fence TIMEOUT while the
-same queue presented 180 frames - verdict retracted as unsupported). Next: run-068
-(**synchronous copy test: WaitIdle + fence state + pixels, descriptor A only,
-CpuUncached readback** - revised 2026-11-18 after the kickoff finding; supersedes
-the A/B/C build `7370D155...`) - built and staged, NRO
-`537FBBEBC80733F3FBB192560C0CD8B7BBF689B0AFCE6634D3A3B5954935FE8F`, tag
-`m1-fix-068b`, unverified. Procedure: `docs/RUN_068.md`.
+Last hardware run: **068** (2026-11-18, **the copy EXECUTES and lands the
+pattern** - waitIdle 5 ms, fence signalled, readback 5A5A5A5A; descriptor A
+canonical; "copy is the killer" dead; the ~9.5 s death unchanged). Next:
+run-069 (**F1: guest-output readback at present 30/150 with BLANK/CONTENT
+verdict; in-frame upload probe presenter-polled + uncached; skip-draw census;
+flush + bounded waits replace poll-give-up; death-watch heartbeat**) - built
+and staged, NRO
+`72D7267639C985E61FDFDCFB23134D760E0F717314989138F24CE41926225123`, tag
+`m1-f1-069`, unverified. Procedure: `docs/RUN_069.md`.
 
 **Run-067 result, in one line:** the copy-only bisect logged `copy fence TIMEOUT
 after up to 1000 ms` for the tiled destination (flags 0x800, size 2949120, align
@@ -310,6 +325,7 @@ Does not work yet:
 | 065 | E6C0F8E2 | **no copy command executes.** Diagnostic: `a buffer->buffer` fence TIMEOUT 250 ms, post=`AAAAAAAA AAAAAAAA` (still the pre-fill); `b buffer->image->buf` TIMEOUT, post=pre-fill; `c clear B to 0xC3` TIMEOUT, not even the clear ran; `d` inconclusive; `summary: a=FAIL b=FAIL c=FAIL`. So the standalone submit path never reaches the GPU - not a format/units/flags/2D-engine problem. Present fence still signs. Fix: uploads ride the frame list. **(Retracted 2026-11-18: the entries were never KICKED - copy-diag blocked the presenting thread inside its waits, present #179->#180 gap = the four 250 ms waits; see the fence-verdict section. The copies executed at #180's kick, after the readbacks.)** |
 | 066 | BB6A8D87 | **uploads execute; death 250 ms later.** The standalone submit was dead: with uploads recorded into the frame list they run (`[upload] #1 960x720 ... recorded into the FRAME list, rowLength 4096 bytes, imageHeight 720 rows`, then #2 480x360, #3/#4 240x180). The carrying frame stalled (present #182 15:33:31.118 -> #183 15:33:31.488, 370 ms vs a ~35 ms cadence) and the process ended at 31.543. The 64x64 readback probe was armed but pre-empted. `[submit]` sites now print queue/device/fence/cmdbuf addresses. |
 | 067 | D12DE792 | **copy fence times out, queue is fine - verdict retracted.** Copy-only bisect: tiled destination `flags 0x800 size 2949120 align 512`, derived pitch 4096 B = the rowLength passed, `copy fence TIMEOUT after up to 1000 ms`; pitch-linear destination rejected by deko3d (`size 0`). Then `present-fence SIGNALLED ... at present #1` and 180 presents followed, so the queue executes and the fence mechanism works - which points at the copy submission never reaching the GPU, not at a wedge. **(Mechanism named 2026-11-18: no kickoff until present #1 - the wait ended 52.255, present #1 kicked 52.313; the copy then rode that kick and was harmless. Run-068's waitIdle flushes/kicks and decides.)** |
+| 068 | 537FBBEB | **BREAKTHROUGH: the copy EXECUTES and lands the pattern.** `[copy-sync] A rows: dkQueueWaitIdle RETURNED after 5 ms`, `fence state after WaitIdle = signalled (queue error state: no)`, readback `[5A5A5A5A 5A5A5A5A]`, `verdict EXECUTED`. Descriptor A canonical (rowLength 4096 B, imageHeight 720 rows, flags 0x800 tiled). The 2D engine, descriptor and fence are fine - the submission needed kicking/waiting. "Copy is the killer" DEAD; 057/058/065/067 timeouts were polling/submit artefacts. In-frame probe armed but death 240 ms later pre-empted its readback (fixed in 069: presenter-polled). 180 presents, same ~9.5 s death on a gui_textures.bnk read, crash block unchanged `98A1A23D` - F2 separate, not chased ahead of F1. |
 
 ### Run-048 result: break located inside sub_8233EEE0
 

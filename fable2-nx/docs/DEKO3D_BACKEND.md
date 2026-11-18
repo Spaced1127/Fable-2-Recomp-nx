@@ -118,23 +118,29 @@ What is implemented:
 Hardware lessons recorded here because each cost a test cycle:
 - Fable submits resolves as **draw packets with `RB_MODECONTROL.edram_mode ==
   kCopy`**; a backend that only implements `IssueCopy` never sees them.
-- `DkCopyBuf.rowLength` is **bytes per row** and `imageHeight` is **total
-  bytes** (`rowLength * rows`), not pixels/rows. Wrong units stall the 2D engine
-  with no queue error.
-- `copyImageToBuffer` from a render target into the guest mirror **stalls this
-  queue** (queue error state 0, fence never signals). Presentation therefore
-  copies the host target image directly; the guest-buffer resolve is deferred to
-  a compute/DKSH pass.
+- `DkCopyBuf.rowLength` is **bytes per row** and `imageHeight` is the **row
+  count** (0/0 = tightly packed). Run 068 proved it on hardware: 960x720 RGBA8,
+  rowLength 4096, imageHeight 720, Usage2DEngine tiled -> EXECUTED, readback =
+  the pattern. The earlier "imageHeight = total bytes" reading here was WRONG
+  (it made the 2D engine walk 2.9M rows of a 2.8 MB block - the run-060 OS kill).
+- **Run-068 correction (hardware-proven):** `submitCommands`/`signalFence` only
+  append GPFIFO entries; the channel is kicked only by `Queue::flush` (reached
+  via `presentImage`, `waitIdle`, or an explicit `flush()`). Fences signal in
+  ~5 ms once kicked. The old lessons "copyImageToBuffer stalls this queue" and
+  "fences never signal" were UNFETCHED submissions, not hardware behaviour -
+  `copyImageToBuffer` reads a tiled image back correctly (run 068). A standalone
+  submit that must complete needs `flush()` after `signalFence`.
 - **Never submit a command list that holds nothing but its opening barrier.** The
   draw path opens a list at the top of every draw (so the per-frame rings can be
   recycled before anything writes to them), and the first frame of the menu is 24
   draws that all legitimately skip for want of rasterization. Recording therefore
   contained only the descriptor/shader-cache invalidation barrier; submitting that
-  and signalling its fence left the fence unsignalled, and the next frame's
-  `EnsureRecording()` waited on it forever. The visible result was a game with no
-  audio, no further swaps and a live console - a hung command processor thread,
-  not a crash. Submit only lists with real commands, and bound every fence wait so
-  the next such stall is a named log line instead of a freeze.
+  and signalling its fence left the fence unsignalled (it was never kicked - see
+  the run-068 correction above), and the next frame's `EnsureRecording()` waited
+  on it forever. The visible result was a game with no audio, no further swaps and
+  a live console - a hung command processor thread, not a crash. Submit only lists
+  with real commands, flush standalone submits, and bound every fence wait so the
+  next such stall is a named log line instead of a freeze.
 - A **second graphics queue does not execute** its command lists here: clears
   must be submitted on the presentation queue, ordered before the present copy.
 - Swapchain images need `DkImageFlags_Usage2DEngine` for 2D-engine copies, and

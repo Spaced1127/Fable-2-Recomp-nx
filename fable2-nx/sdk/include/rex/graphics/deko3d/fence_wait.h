@@ -2,12 +2,17 @@
  * @file        graphics/deko3d/fence_wait.h
  * @brief       Bounded waits for deko3d fences on this port.
  *
- * Both failure modes this backend has already measured on hardware end in a
- * fence that never signals: a 2D-engine copy out of a render target into the
- * guest mirror stalls the queue with `queue error state 0`, and a command list
- * submitted on a second graphics queue is simply never executed. The SVR2011
- * porting guide's rule is the same one - never `dkQueueWaitIdle`, use a fence,
- * and give the presentation copy a timeout.
+ * RUN-068 CORRECTION (hardware-proven): fences on this stack DO signal, in
+ * ~5 ms, once the submission is KICKED. The installed deko3d's submitCommands
+ * and signalFence only append GPFIFO entries to a pending batch; the doorbell
+ * (nvGpuChannelKickoff) fires only from Queue::flush - reached via presentImage
+ * in the frame loop, via waitIdle, or an explicit flush(). Every historical
+ * "fence never signals" / "copy is the killer" / "standalone submit path is
+ * dead" verdict (runs 057/058/065/067) was an UNFETCHED submission, not hardware
+ * behaviour: the probes waited without anything kicking the channel, and 065's
+ * probe even blocked the presenting thread inside its waits. Do not re-derive
+ * those conclusions; a standalone submit that must complete needs flush() (or
+ * waitIdle) after signalFence.
  *
  * An unbounded wait on this port does not produce a crash; it produces a game
  * that is alive but stopped, because the thread that waits is the Xenos command
@@ -27,13 +32,10 @@
 
 namespace rex::graphics::deko3d {
 
-// Run-063 CORRECTION: fences on this stack DO signal - run 062's present-copy
-// fence signaled one frame after submission, on the render queue. The earlier
-// claim that "fences never signal" was wrong: it came from a probe whose list had
-// already been overtaken by an invalid 2D copy (and from a boot-time test on a
-// queue that had never executed anything). What remains true and useful is that
-// every wait must be BOUNDED and named, because a wait on a wedged queue stops the
-// command processor and the game with it.
+// Fences signal once kicked (run 068: waitIdle returned in 5 ms, fence
+// signalled, queue error state no, readback = the pattern). Every wait stays
+// BOUNDED and named, because a wait on a wedged queue stops the command
+// processor and the game with it.
 constexpr int64_t kFenceWaitNs = 5000000000;
 
 // The bound WaitFence actually uses, in nanoseconds (cvar deko3d_fence_wait_ms).
@@ -50,13 +52,11 @@ struct FenceWaitStats {
 // timeout, logs `what` once and then every 32nd occurrence.
 bool WaitFence(dk::Fence& fence, const char* what, FenceWaitStats& stats);
 
-// Run-059: polls a fence once and never blocks.
-//
-// The run-058 self-test settled it: a fence signalled on an EMPTY command list
-// (`fence-only`) also times out, so dkFenceWait never observes a signal on this
-// stack at all. Every wait therefore has to become a poll - a wait can only cost
-// time now, and at 250 ms per use it was still throttling the display to a
-// standstill.
+// Polls a fence once and never blocks. Use where a wait would stall the frame
+// loop and lateness is harmless (telemetry, opportunistic retirement). For a
+// submission that must COMPLETE, prefer a bounded WaitFence after an explicit
+// queue.flush() - the run-058 "fence-only times out" verdict that justified
+// poll-everywhere was the missing-kickoff artefact (run 068 correction).
 bool PollFence(dk::Fence& fence, const char* what, FenceWaitStats& stats);
 
 // Run-063: bounded wait used by resource retirement (250 ms), returns true if it
@@ -83,14 +83,24 @@ uint64_t GpuSubmitEpoch();
 void NoteFenceObserved();
 bool FencesObserved();
 
-// Run-064: the present fence is the one fence observed to work (run 062/063:
-// signalled one frame after submission, on the render queue). The queue is
-// in-order, so once the present fence for frame K has signalled, every list
-// submitted before it - including our buffer->image copies - has completed. That
-// makes it the witness for copy completion when a copy's own fence does not
-// report. NoteFramePresented() is called by the presenter whenever its fence
-// poll succeeds; PresentEpoch() counts those frames.
+// The queue is in-order, so once the present fence for frame K has signalled,
+// every list submitted before it - including our buffer->image copies - has
+// completed. That makes the present age a witness for copy completion alongside
+// the copy's own fence (which signals once kicked - run 068).
+// NoteFramePresented() is called by the presenter whenever its fence wait/poll
+// succeeds; PresentEpoch() counts those frames.
 void NoteFramePresented();
 uint64_t PresentEpoch();
+
+// Run-069 death-watch: the ~9.5 s below-guest death writes no crash block, so the
+// log tail must name the last stage. NoteTextureUpload() bumps a counter the
+// presenter's periodic [death-watch] line prints with the present count.
+void NoteTextureUpload();
+uint64_t TextureUploadCount();
+
+// Run-069: print the frame-path upload probe's readback (non-blocking). Called by
+// the presenter on every present so a death shortly after the first upload cannot
+// pre-empt the pixels (run 068: armed, then death 240 ms later, nothing printed).
+void PollFrameUploadProbe();
 
 }  // namespace rex::graphics::deko3d

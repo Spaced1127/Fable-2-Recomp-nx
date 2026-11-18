@@ -241,9 +241,11 @@ bool Deko3DRenderTargetCache::WaitForPendingList(const char* before_what) {
   if (!resolve_pending_) {
     return true;
   }
-  // Run-059: poll only (see EnsureRecording). A draw must never be skipped or the
-  // recording stopped because a fence that cannot signal is late.
-  PollFence(resolve_fence_, before_what, resolve_fence_stats_);
+  // Run-069: bounded wait (250 ms). The resolve list is flushed when submitted
+  // (see Flush), so its fence signals in ~5 ms (run 068); the old poll-only rule
+  // rested on the retracted "fences never signal" artefact. A timeout is logged
+  // and the draw proceeds - a lost signal must not skip draws.
+  WaitFenceForRetirement(resolve_fence_, before_what, resolve_fence_stats_);
   resolve_pending_ = false;
   for (const std::pair<uint32_t, uint32_t>& range : gpu_written_ranges_) {
     shared_memory_.RangeWrittenByGpu(range.first, range.second);
@@ -283,15 +285,18 @@ void Deko3DRenderTargetCache::SubmitAndWaitForReuse() {
     std::lock_guard lock(device_.submit_mutex());
     device_.queue().submitCommands(list);
     device_.queue().signalFence(reuse_fence_, true);
+    // Run-069: kick the channel so the list executes and its fence signals now
+    // (submitCommands/signalFence only append GPFIFO entries - run 068). Without
+    // this the wait below would time out on an unfetched list every split.
+    device_.queue().flush();
   }
   NoteGpuSubmit();
   // Blocking on purpose: the command memory and the per-frame rings are about to
-  // be written again, so the GPU must have finished reading them. Bounded for the
-  // same reason as every other wait - a stall must become a log line, not a hung
-  // game thread.
-  // Run-059: poll only. The command memory is reused either way; waiting bought
-  // nothing but a stall per split.
-  PollFence(reuse_fence_, "mid-frame command list", reuse_fence_stats_);
+  // be written again, so the GPU must have finished reading them. Bounded - a
+  // stall must become a log line, not a hung game thread. With the flush above
+  // the fence signals in ~5 ms (run 068), so this is cheap AND correct; the old
+  // poll-only reuse raced the GPU under the retracted "fences never signal" note.
+  WaitFenceForRetirement(reuse_fence_, "mid-frame command list", reuse_fence_stats_);
   for (const std::pair<uint32_t, uint32_t>& range : gpu_written_ranges_) {
     shared_memory_.RangeWrittenByGpu(range.first, range.second);
   }
@@ -339,6 +344,11 @@ bool Deko3DRenderTargetCache::Flush() {
     std::lock_guard lock(device_.submit_mutex());
     device_.queue().submitCommands(list);
     device_.queue().signalFence(resolve_fence_, true);
+    // Run-069: kick so the frame's render/resolve work executes promptly and its
+    // fence can signal (run 068: unfetched submissions were the "dead fence"
+    // artefact). The presenter's readback and present copy are queued after this
+    // list, so queue order still orders them after the resolve.
+    device_.queue().flush();
     resolve_pending_ = true;
   }
   static bool logged_resolve_submit = false;
@@ -346,8 +356,8 @@ bool Deko3DRenderTargetCache::Flush() {
     logged_resolve_submit = true;
     REXGPU_INFO("deko3d: resolve list submitted on the render queue");
   }
-  // Do not wait here: the presentation queue waits for this fence before it
-  // reads the target image, so render work never sits behind a present.
+  // Do not wait here: the present copy and the guest-output readback are
+  // submitted after this list on the same in-order queue.
   return true;
 }
 

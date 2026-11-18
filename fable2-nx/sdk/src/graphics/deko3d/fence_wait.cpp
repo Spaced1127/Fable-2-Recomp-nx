@@ -18,6 +18,7 @@ namespace {
 std::atomic<uint64_t> g_submit_epoch{1};
 std::atomic<bool> g_fence_observed{false};
 std::atomic<uint64_t> g_present_epoch{0};
+std::atomic<uint64_t> g_texture_uploads{0};
 }  // namespace
 
 void NoteGpuSubmit() { g_submit_epoch.fetch_add(1, std::memory_order_relaxed); }
@@ -26,11 +27,13 @@ bool FencesObserved() { return g_fence_observed.load(std::memory_order_relaxed);
 void NoteFramePresented() { g_present_epoch.fetch_add(1, std::memory_order_relaxed); }
 uint64_t PresentEpoch() { return g_present_epoch.load(std::memory_order_relaxed); }
 uint64_t GpuSubmitEpoch() { return g_submit_epoch.load(std::memory_order_relaxed); }
+void NoteTextureUpload() { g_texture_uploads.fetch_add(1, std::memory_order_relaxed); }
+uint64_t TextureUploadCount() { return g_texture_uploads.load(std::memory_order_relaxed); }
 
-// Run-058/063: how long any GPU wait may block. Fences do signal here (run 062),
-// so this bound is only about a *stuck* queue: 250 ms keeps a healthy GPU
-// (microseconds of work) unaffected and turns a wedged one into a log line
-// instead of a frozen game. Set 5000 for the old behaviour when A/B-ing.
+// How long any GPU wait may block. Fences signal in ~5 ms once the submission is
+// kicked (run 068), so this bound is only about a *stuck* queue: 250 ms keeps a
+// healthy GPU unaffected and turns a wedged one into a log line instead of a
+// frozen game. Set 5000 for the old behaviour when A/B-ing.
 REXCVAR_DEFINE_INT32(deko3d_fence_wait_ms, 250, "GPU/deko3d",
                      "Bounded GPU wait before a fence is treated as lost, in milliseconds "
                      "(default 250; 5000 is the pre-run-058 behaviour).")
@@ -72,7 +75,7 @@ bool PollFence(dk::Fence& fence, const char* what, FenceWaitStats& stats) {
   ++stats.timeouts;
   if (stats.timeouts == 1) {
     REXGPU_WARN("deko3d: {} fence not signalled on the first poll; continuing without a wait "
-                "(fences do signal here - run 062; this one is simply not done yet)",
+                "(fences signal once kicked - run 068; this one is simply not done yet)",
                 what);
   } else if ((stats.timeouts % 512) == 0) {
     REXGPU_WARN("deko3d: {} fence still not signalled ({} polls)", what, stats.timeouts);

@@ -4,7 +4,7 @@ Ranked milestones. Each needs the listed evidence from a **hardware run**; a
 change is not "done" until that evidence exists. Ordered so each one is
 observable on its own.
 
-## Where we are (after run 067, run-068 package prepared)
+## Where we are (after run 068, run-069 package prepared)
 
 Standing goal and F1-F5 status: [GOAL.md](../../GOAL.md).
 
@@ -12,7 +12,8 @@ Standing goal and F1-F5 status: [GOAL.md](../../GOAL.md).
 |---|---|---|
 | `read of guest 0x00000000` in `sub_821C95D8`, ~48 s | guest VM (script argument) | argument 1 is nil; host-side work named the object it should be - the entity **`BowerstoneMarketExit_Gate` (`0xE6CCB784`)** from `data\levels.bnk`, resolved by name at runtime. run-059 hooks the engine's name-table lookup (`0x82C64018`) and logs key + result per call, which decides "table empty (mount never ran)" vs "populated, entry missing (registration)". Not reached since 058: the ~10 s below-guest death fires first |
 | ~10 s below-guest death (F2) | host / GPU channel | every run 059-067 dies at ~9-10 s during a `gui_textures.bnk` / `Globals` texture-bank read, no new crash block (`98A1A23D...` unchanged). Run-042 saw the Horizon fatal-error message: OS kill, not a guest fault. Candidates: command-memory reuse vs GPU read, a bad upload DMA once copies execute, or the first sampling draw |
-| 2D copy EXECUTED/DROPPED/WEDGED (F1) | host renderer | **mechanism named (host-side, unverified):** `submitCommands`/`signalFence` never kick the channel; only `presentImage` (via `Queue::flush`) and `waitIdle` do. All standalone copy probes timed out unfetched; run-067's setup copy rode present #1's kick and was harmless (180 presents after). Run-068 asks `waitIdle` directly: descriptor A only, CpuUncached readback, fence before/after + pixels. See STATUS.md fence-verdict section |
+| 2D copy (F1, half 1) | host renderer | **PROVEN on hardware (run 068): EXECUTED.** Descriptor A canonical (rowLength 4096 B, imageHeight 720 rows, Usage2DEngine tiled); waitIdle 5 ms, fence signalled, readback = the pattern. Mechanism: `submitCommands`/`signalFence` never kick the channel; only `presentImage`/`waitIdle`/explicit `flush` do - all earlier "fence never signals / copy fails" verdicts were unfetched submissions. Run-069 applies flush + bounded waits everywhere |
+| blank screen (F1, half 2) | host renderer / guest draws | run-069 reads the guest output image (branch=1 surface) back at present 30/150: uniform clear -> guest never drew (upstream draw/target binding; the 540/run no_render_targets skips censused by class, first MASKED skip register-dumped); content -> present copy/swapchain at fault. In-frame upload probe now presenter-polled (run 068's was pre-empted by the death) |
 | display | host renderer | presents every guest frame (`[present] #N branch=1 age=1`, 180+/run, no `giving up on render recording`); present fence signals at #1. Screen still blank: no texture pixel has ever been proven in a GPU image, and rectangle-list UI geometry draws without textures |
 
 M1 is the crash gate: the process cannot survive to the milestones below it. The
