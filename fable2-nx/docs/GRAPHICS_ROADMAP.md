@@ -4,12 +4,16 @@ Ranked milestones. Each needs the listed evidence from a **hardware run**; a
 change is not "done" until that evidence exists. Ordered so each one is
 observable on its own.
 
-## Where we are (after run 059, run-060 package prepared)
+## Where we are (after run 067, run-068 package prepared)
+
+Standing goal and F1-F5 status: [GOAL.md](../../GOAL.md).
 
 | blocker | class | state |
 |---|---|---|
-| `read of guest 0x00000000` in `sub_821C95D8`, ~48 s | guest VM (script argument) | argument 1 is nil; host-side work named the object it should be - the entity **`BowerstoneMarketExit_Gate` (`0xE6CCB784`)** from `data\levels.bnk`, resolved by name at runtime. run-059 hooks the engine's name-table lookup (`0x82C64018`) and logs key + result per call, which decides "table empty (mount never ran)" vs "populated, entry missing (registration)" |
-| display | host renderer | **fence removal works**: run 059 presented 183 frames at `age=1`, i.e. the swapchain followed the guest at ~23 Hz. It then died at 9 s with **no crash block** (run-041 below-guest class) because command memory is rewritten while the GPU reads it - the old waits had been hiding that race. run-060 retires by submit age: 3 frame command slots, 16 present-copy slots, staging after 8 submits, no fence waits at all |
+| `read of guest 0x00000000` in `sub_821C95D8`, ~48 s | guest VM (script argument) | argument 1 is nil; host-side work named the object it should be - the entity **`BowerstoneMarketExit_Gate` (`0xE6CCB784`)** from `data\levels.bnk`, resolved by name at runtime. run-059 hooks the engine's name-table lookup (`0x82C64018`) and logs key + result per call, which decides "table empty (mount never ran)" vs "populated, entry missing (registration)". Not reached since 058: the ~10 s below-guest death fires first |
+| ~10 s below-guest death (F2) | host / GPU channel | every run 059-067 dies at ~9-10 s during a `gui_textures.bnk` / `Globals` texture-bank read, no new crash block (`98A1A23D...` unchanged). Run-042 saw the Horizon fatal-error message: OS kill, not a guest fault. Candidates: command-memory reuse vs GPU read, a bad upload DMA once copies execute, or the first sampling draw |
+| 2D copy EXECUTED/DROPPED/WEDGED (F1) | host renderer | **mechanism named (host-side, unverified):** `submitCommands`/`signalFence` never kick the channel; only `presentImage` (via `Queue::flush`) and `waitIdle` do. All standalone copy probes timed out unfetched; run-067's setup copy rode present #1's kick and was harmless (180 presents after). Run-068 asks `waitIdle` directly: descriptor A only, CpuUncached readback, fence before/after + pixels. See STATUS.md fence-verdict section |
+| display | host renderer | presents every guest frame (`[present] #N branch=1 age=1`, 180+/run, no `giving up on render recording`); present fence signals at #1. Screen still blank: no texture pixel has ever been proven in a GPU image, and rectangle-list UI geometry draws without textures |
 
 M1 is the crash gate: the process cannot survive to the milestones below it. The
 display item is not a separate milestone - it is the other half of the same work,
@@ -25,13 +29,15 @@ No GPU wedge, no OS kill for a hung channel, frames presented continuously.
   at the 30 Hz cap.
 - Evidence: `fable_2_0NN.log` (no timeout lines), `rex_perfil` with 10 s samples
   showing non-zero fps throughout.
-- Current: the queue does **not** die at the first texture upload - run 057
-  recorded frames 0-127 after the upload copy's fence was declared lost, so
-  `dkFenceWait` simply never observes these 2D-engine copies signalling, and the
-  old 5 s bounded wait is what stalls the command processor per texture. Run-058
-  switches the upload to the presenter's protocol: submit, never wait, poll the
-  fence only to recycle staging. The presenter was already doing this
-  (`branch=1`, swaps 1/2 show guest output).
+- Current: the queue does **not** die at the first texture upload. The per-copy
+  fence timeouts are a missing channel kickoff, not dead fences or a wedge:
+  `submitCommands`/`signalFence` append GPFIFO entries without ringing the
+  doorbell; only `presentImage` and `waitIdle` flush/kick (host-side binary
+  finding, STATUS.md fence-verdict section). Uploads ride the frame list since
+  run 066 and execute at the frame's present kick; run-067 proved the 960x720
+  RGBA8 tiled copy harmless at setup. Run-068 (`waitIdle` witness, descriptor A,
+  uncached readback) decides EXECUTED/DROPPED/WEDGED on hardware. M0 acceptance
+  still stands: no timeout lines, no `giving up on render recording`, 30 Hz cap.
 
 ## M1 - Guest crash fixed, menu stays alive  [gates M2 onwards]
 

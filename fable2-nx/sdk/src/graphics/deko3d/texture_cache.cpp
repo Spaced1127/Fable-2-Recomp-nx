@@ -90,7 +90,15 @@ REXCVAR_DEFINE_BOOL(deko3d_upload_probe, false, "GPU/deko3d",
 REXCVAR_DEFINE_BOOL(deko3d_copy_sync, true, "GPU/deko3d",
                     "At setup, submit one 960x720 buffer->image copy, log the fence state before "
                     "and after a bounded dkQueueWaitIdle, read 64x64 back, and print "
-                    "EXECUTED/DROPPED/WEDGED. Three DkCopyBuf descriptors: rows, bytes, tight 0/0.")
+                    "EXECUTED/DROPPED/WEDGED. Descriptor A (rows) only by default.")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
+// Run-068: descriptors B (imageHeight = total bytes - the run-060 OS-kill DMA if
+// it executes) and C (tight 0/0) are opt-in. A alone decides the verdict for the
+// descriptor the port uses; one measured variable per hardware run.
+REXCVAR_DEFINE_BOOL(deko3d_copy_sync_extra, false, "GPU/deko3d",
+                    "Also run copy-sync descriptors B (bytes) and C (tight 0/0) after A. B can "
+                    "kill the process if it executes (run 060); leave off unless A was DROPPED.")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 REXCVAR_DEFINE_BOOL(deko3d_copy_bisect, false, "GPU/deko3d",
@@ -951,6 +959,20 @@ bool Deko3DTextureCache::RunCopyBisect() {
 
 // Run-068: does that one copy execute? A synchronous answer at setup.
 //
+// Host-side finding (disassembly of the installed libdeko3d.a + libnx
+// gpu_channel.o, byte-identical to the WSL toolchain the NRO links): neither
+// submitCommands nor signalFence kicks the GPU channel - they append GPFIFO
+// entries to a 2048-entry batch. The doorbell (nvGpuChannelKickoff) fires only
+// from Queue::flush, which the frame loop reaches via presentImage, and from
+// waitIdle (signalFence + flush + wait). So every standalone copy test so far
+// (058 boot probes, 065 a-d, 067 bisect) timed out WITHOUT the GPU ever being
+// told to fetch the entries: 065 even blocked the presenting thread inside its
+// fence waits (present #179 -> #180 gap = the four 250 ms waits). Fences are a
+// monotonic per-channel semaphore, so a later present fence signalling
+// retroactively satisfies all earlier fences on the queue. This test uses
+// waitIdle as the witness precisely because it flushes/kicks. Unverified on
+// hardware until run 068 returns.
+//
 // Run 067 left a contradiction: the copy's fence timed out for 1000 ms and then the
 // queue presented frames happily - which is far more consistent with the copy
 // submission never being executed than with a wedged 2D engine. This test cannot
@@ -962,10 +984,10 @@ bool Deko3DTextureCache::RunCopyBisect() {
 //      thread with a 2 s observation window so the log always returns;
 //   3. read 64x64 of the destination back and print the pixels.
 //
-// Three source descriptors are tried, because the units of DkCopyBuf are the one
-// thing the header does not document (deko3d's own samples pass 0/0 for a tightly
-// packed source, which is Vulkan's convention - rowLength in bytes, imageHeight in
-// ROWS):
+// Descriptor A runs by default; B and C are opt-in (deko3d_copy_sync_extra),
+// because the units of DkCopyBuf are the one thing the header does not document
+// (deko3d's own samples pass 0/0 for a tightly packed source, which is Vulkan's
+// convention - rowLength in bytes, imageHeight in ROWS):
 //
 //   A  rowLength 4096, imageHeight 720          (rows; what the port passes now)
 //   B  rowLength 4096, imageHeight 2949120      (total bytes; the old reading)
@@ -1007,9 +1029,15 @@ bool Deko3DTextureCache::RunCopySyncTest() {
   dk::ImageView view{image};
   view.setMipLevels(0, 1);
 
+  // CpuUncached, not CpuCached: the CPU pre-fills 0xAA and later reads the
+  // result. With a CPU-cached block those reads hit the CPU's own dirty 0xAA
+  // lines even when the GPU wrote the pattern to DRAM - a fake DROPPED verdict.
+  // This deko3d exposes no CPU-cache invalidate (only dkMemBlockFlushCpuCache),
+  // so uncached CPU access is the only coherent readback here. Uncached writes
+  // go straight to DRAM, which is also what the 2D engine reads.
   dk::UniqueMemBlock readback =
       dk::MemBlockMaker{device_.device(), 4096 * 64}
-          .setFlags(DkMemBlockFlags_CpuCached | DkMemBlockFlags_GpuCached)
+          .setFlags(DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached)
           .create();
   if (!readback) {
     REXGPU_WARN("[copy-sync] readback allocation failed");
@@ -1053,7 +1081,16 @@ bool Deko3DTextureCache::RunCopySyncTest() {
       {"C tight (rowLength 0, imageHeight 0, 3840 pitch)", kTightPitch, 0, 0},
   };
 
-  for (const Attempt& attempt : attempts) {
+  // One measured variable per run: A alone decides EXECUTED/DROPPED/WEDGED for
+  // the descriptor the port actually uses. B is the run-060 OS-kill DMA (12 GB
+  // of out-of-bounds source reads) if it ever executes, and C answers nothing
+  // once A has decided - both stay behind an opt-in cvar for a later A/B.
+  const bool extra = REXCVAR_GET(deko3d_copy_sync_extra);
+  for (size_t i = 0; i < 3; ++i) {
+    if (i > 0 && !extra) {
+      break;
+    }
+    const Attempt& attempt = attempts[i];
     const uint32_t bytes = attempt.pitch * kH;
     const uint32_t size = (bytes + DK_MEMBLOCK_ALIGNMENT - 1) & ~uint32_t(DK_MEMBLOCK_ALIGNMENT - 1);
     dk::UniqueMemBlock staging =
@@ -1097,13 +1134,14 @@ bool Deko3DTextureCache::RunCopySyncTest() {
                 fence_before ? "signalled" : "not signalled");
     const bool idle_ok = bounded_idle(attempt.name);
     const bool fence_after = fence.wait(0) == DkResult_Success;
-    REXGPU_WARN("[copy-sync] {}: fence state after WaitIdle = {}", attempt.name,
-                fence_after ? "signalled" : "not signalled");
+    REXGPU_WARN("[copy-sync] {}: fence state after WaitIdle = {} (queue error state: {})",
+                attempt.name, fence_after ? "signalled" : "not signalled",
+                device_.queue().isInErrorState() ? "YES - channel faulted" : "no");
 
     if (!idle_ok) {
       REXGPU_WARN("[copy-sync] {}: verdict WEDGED - the queue never went idle; this copy is the "
                   "wedge and the units/flags question is now worth pursuing", attempt.name);
-      continue;
+      break;  // the queue is dead; later attempts would only pile up parked threads
     }
 
     // Read 64x64 back; the queue is idle, so this list executes immediately.

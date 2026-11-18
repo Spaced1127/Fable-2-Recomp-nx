@@ -50,8 +50,9 @@ void Fable2App::OnPreSetup(rex::RuntimeConfig& config) {
   // Build identity for hardware logs. The NRO hash cannot be baked in here
   // (a rebuild changes it), so the tag names the build family and the runner
   // verifies the hash with Get-FileHash. Warn so it is flushed at once.
-  REXLOG_WARN("[fable2] build tag: m1-fix-068 "
-              "(synchronous copy test: WaitIdle + fence state + pixels, rows/bytes/tight)");
+  REXLOG_WARN("[fable2] build tag: m1-fix-068b "
+              "(copy-sync revised: WaitIdle witness, descriptor A only, CpuUncached readback, "
+              "queue error state logged; B/C opt-in via deko3d_copy_sync_extra)");
   // Proves which witnesses this binary carries: run 059's log had no
   // [vm-lookup] line and could not say whether the hook was missing or had simply
   // not been reached before the process died.

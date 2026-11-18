@@ -1,3 +1,7 @@
+**Standing goal: [GOAL.md](../../GOAL.md)** - F1 real frames, F2 survival, F3
+title/menu, F4 input, F5 hardware; status line kept current there. The autonomy
+contract and discipline in it govern every session.
+
 # HANDOFF TO FRESH SESSION - 2026-11-18
 
 ## What this is
@@ -28,6 +32,24 @@ no fault information).
   failed with the destination still holding its `0xAA` pre-fill (run 065).
 - Fences DO work on this stack (run 062). The earlier "fences never signal" note
   was wrong and has been deleted from the code; every wait stays bounded and named.
+- **Named mechanism for the per-copy timeouts (host-side, 2026-11-18, unverified
+  on hardware until run 068):** disassembly of the installed `libdeko3d.a`
+  (`dk_queue.o`, `dk_fence.o`) and libnx `gpu_channel.o` - byte-identical (MD5) to
+  the WSL toolchain the NRO links - shows `submitCommands` and `signalFence` only
+  append GPFIFO entries to a 2048-entry batch; **neither kicks the channel**. The
+  doorbell (`nvGpuChannelKickoff`) fires only from `Queue::flush`, reached in the
+  frame loop via `presentImage`, and from `waitIdle` (= signalFence + flush +
+  wait). So every standalone copy probe (058 boot, 065 a-d, 067 bisect) timed out
+  with the entries never fetched: 065's copy-diag ran on the presenting thread,
+  and its four 250 ms waits ARE the present #179 (03:33:19.016) -> #180
+  (03:33:20.312) gap; #180's kick then executed the whole burst, which is why the
+  pre-fills survived every readback. Fences are a monotonic per-channel semaphore
+  (`wait` = `*payload >= expected`), so a signalling present fence retroactively
+  satisfies every earlier fence on queue 0x1 - the 067 copy fence would read
+  SIGNALLED if re-polled after present #1 (it never was). This retracts "fence
+  primitive dead" (058) and "the standalone submit path never reaches the GPU"
+  (065) as hardware claims: both are the same missing-kickoff artifact. Run-068's
+  `waitIdle` witness flushes/kicks, so its verdict is trustworthy.
 
 ## The one open question
 
@@ -45,13 +67,16 @@ powershell -ExecutionPolicy Bypass -File H:\Projects\Fable2Port\Fable-2-Recomp-n
 ```
 
 The staged package is `H:\Projects\Fable2Port\stage\switch\Fable II`
-(`fable_2.nro`, `fable_2.toml`, `fable2_config.toml`; run-068 NRO
-`7370D15571AF9DA9C4FFF2CC6BC1DE32C71A7F88C27EA975271DFDD8C8736876`). The user
+(`fable_2.nro`, `fable_2.toml`, `fable2_config.toml`; run-068 NRO hash in
+`docs/RUN_068.md` - the revised build supersedes `7370D155...`). The user
 copies the three files to `E:\switch\Fable II`, launches full-memory, and returns
 the **whole `logs/` folder as-is** (never renamed) plus a photo. Read
-`[copy-sync]` lines in `fable_2_0NN.log`: per descriptor A/B/C - the recorded
-list/cmdbuf/source, fence state before and after `dkQueueWaitIdle` with its timing,
-the 64x64 pixels, and the `EXECUTED / DROPPED / WEDGED` verdict. Then branch:
+`[copy-sync]` lines in `fable_2_0NN.log`: descriptor A only (rows; B/bytes and
+C/tight are opt-in via `deko3d_copy_sync_extra` - B is the run-060 OS-kill DMA if
+it executes, so it stays off) - the recorded list/cmdbuf/source, fence state
+before and after `dkQueueWaitIdle` with its timing and the queue error state,
+the 64x64 pixels (readback block is CpuUncached so the CPU cannot read its own
+dirty 0xAA pre-fill), and the `EXECUTED / DROPPED / WEDGED` verdict. Then branch:
 EXECUTED -> the copy is legal and the ~250 ms death is the draw that samples the
 uploaded image (bisect the descriptor/sampler with a 64x64 target); DROPPED -> the
 command never reaches the GPU even though WaitIdle returns (chase submission and
@@ -84,6 +109,10 @@ copy legality (flags, tiling, tile-aligned rect, units).
 
 Single source of truth for where the port stands. Hardware results are the user's
 runs; anything not yet run on the console is marked **unverified**.
+
+**Standing goal: [GOAL.md](../../GOAL.md)** - F1 real frames, F2 survival, F3
+title/menu, F4 input, F5 hardware. Its status line is kept current there; the
+autonomy contract and discipline in it govern every session.
 
 ## Log return protocol - NO RENAMES, EVER (user directive)
 
@@ -144,12 +173,13 @@ the 2026-11-15 quiet-mode order in every respect.
 - Persist this for every future session; it replaces the quiet-mode section that
   used to live here.
 
-Last hardware run: **067** (2026-11-17, copy-only bisect: copy fence TIMEOUT while the
+Last hardware run: **067** (2026-11-18, copy-only bisect: copy fence TIMEOUT while the
 same queue presented 180 frames - verdict retracted as unsupported). Next: run-068
-(**synchronous copy test: WaitIdle + fence state + pixels, rows/bytes/tight**) -
-built and staged, NRO
-`7370D15571AF9DA9C4FFF2CC6BC1DE32C71A7F88C27EA975271DFDD8C8736876`, tag
-`m1-fix-068`, unverified.
+(**synchronous copy test: WaitIdle + fence state + pixels, descriptor A only,
+CpuUncached readback** - revised 2026-11-18 after the kickoff finding; supersedes
+the A/B/C build `7370D155...`) - built and staged, NRO
+`537FBBEBC80733F3FBB192560C0CD8B7BBF689B0AFCE6634D3A3B5954935FE8F`, tag
+`m1-fix-068b`, unverified. Procedure: `docs/RUN_068.md`.
 
 **Run-067 result, in one line:** the copy-only bisect logged `copy fence TIMEOUT
 after up to 1000 ms` for the tiled destination (flags 0x800, size 2949120, align
@@ -277,9 +307,9 @@ Does not work yet:
 | 062 | 7DA12455 | **fences work.** `[present-fence] SIGNALLED on the render queue at present #1 (1 frame after the copy)` - the primitive is fine and the old note is retracted. 186 presents over ~9.5 s, then the same below-guest death as 060/061 (crash block unchanged, `98A1A23D...`) - now blamed on age-based staging retirement. Draws: 552 `no_render_targets` (mostly legitimate null draws), 194 `primitive_type` = `kRectangleList` (xenos 0x08, **not** a quad strip - `kQuadList` is 0x0D and was already mapped), 3 `no_rasterization`. Also 185 EDRAM-transfer lines and a pending depth-resolve copy; 70 slow 2 KB reads (~1.3 s). |
 | 063 | C5E37F3B | **rectangle lists fixed; copy fences still silent.** `[primitive] rectangle list #1..#8 drawn as a triangle strip` and `primitive_type` skips 194 -> **0** - that class is closed. 180 presents in ~10.3 s, present fence signalled, but `copy validation fence not signalled within 250 ms` and `texture staging fence not signalled`: **no readback pixels were ever printed**. Death at ~10.3 s right after `texture upload 4 of 240x180 format 7` while reading `globals_textures.bnk` (292 MB offset); crash block unchanged (`98A1A23D...`). Remaining skips: 540 `no_render_targets`, 3 `no_rasterization`. |
 | 064 | E569CBB6 | **first pixel proof: zeros.** `[upload-validate] MISMATCH via own fence: 8 samples differ (first at byte 0): src=5A rb=00; checksum 08D4A082; first pixels [00000000 ...]` - the whole 64x64 destination reads zero after staging->A->B->readback. Fences exonerated (copy/staging fences miss only the first poll, then signal) and memory exonerated (2277 MiB free after GPU setup; heap 1240->1058 MiB through the uploads). Audio healthy. 181 presents, death still ~9.3 s on a `gui_textures.bnk` read, crash block unchanged. |
-| 065 | E6C0F8E2 | **no copy command executes.** Diagnostic: `a buffer->buffer` fence TIMEOUT 250 ms, post=`AAAAAAAA AAAAAAAA` (still the pre-fill); `b buffer->image->buf` TIMEOUT, post=pre-fill; `c clear B to 0xC3` TIMEOUT, not even the clear ran; `d` inconclusive; `summary: a=FAIL b=FAIL c=FAIL`. So the standalone submit path never reaches the GPU - not a format/units/flags/2D-engine problem. Present fence still signs. Fix: uploads ride the frame list. |
+| 065 | E6C0F8E2 | **no copy command executes.** Diagnostic: `a buffer->buffer` fence TIMEOUT 250 ms, post=`AAAAAAAA AAAAAAAA` (still the pre-fill); `b buffer->image->buf` TIMEOUT, post=pre-fill; `c clear B to 0xC3` TIMEOUT, not even the clear ran; `d` inconclusive; `summary: a=FAIL b=FAIL c=FAIL`. So the standalone submit path never reaches the GPU - not a format/units/flags/2D-engine problem. Present fence still signs. Fix: uploads ride the frame list. **(Retracted 2026-11-18: the entries were never KICKED - copy-diag blocked the presenting thread inside its waits, present #179->#180 gap = the four 250 ms waits; see the fence-verdict section. The copies executed at #180's kick, after the readbacks.)** |
 | 066 | BB6A8D87 | **uploads execute; death 250 ms later.** The standalone submit was dead: with uploads recorded into the frame list they run (`[upload] #1 960x720 ... recorded into the FRAME list, rowLength 4096 bytes, imageHeight 720 rows`, then #2 480x360, #3/#4 240x180). The carrying frame stalled (present #182 15:33:31.118 -> #183 15:33:31.488, 370 ms vs a ~35 ms cadence) and the process ended at 31.543. The 64x64 readback probe was armed but pre-empted. `[submit]` sites now print queue/device/fence/cmdbuf addresses. |
-| 067 | D12DE792 | **copy fence times out, queue is fine - verdict retracted.** Copy-only bisect: tiled destination `flags 0x800 size 2949120 align 512`, derived pitch 4096 B = the rowLength passed, `copy fence TIMEOUT after up to 1000 ms`; pitch-linear destination rejected by deko3d (`size 0`). Then `present-fence SIGNALLED ... at present #1` and 180 presents followed, so the queue executes and the fence mechanism works - which points at the copy submission never reaching the GPU, not at a wedge. |
+| 067 | D12DE792 | **copy fence times out, queue is fine - verdict retracted.** Copy-only bisect: tiled destination `flags 0x800 size 2949120 align 512`, derived pitch 4096 B = the rowLength passed, `copy fence TIMEOUT after up to 1000 ms`; pitch-linear destination rejected by deko3d (`size 0`). Then `present-fence SIGNALLED ... at present #1` and 180 presents followed, so the queue executes and the fence mechanism works - which points at the copy submission never reaching the GPU, not at a wedge. **(Mechanism named 2026-11-18: no kickoff until present #1 - the wait ended 52.255, present #1 kicked 52.313; the copy then rode that kick and was harmless. Run-068's waitIdle flushes/kicks and decides.)** |
 
 ### Run-048 result: break located inside sub_8233EEE0
 
