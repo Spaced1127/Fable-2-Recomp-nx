@@ -77,12 +77,22 @@ REXCVAR_DEFINE_BOOL(deko3d_upload_skip_depth, true, "GPU/deko3d",
                     "discriminator for the post-upload-batch death.")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
-// Run-071: the frame-path probe records a copyImageToBuffer into the frame list
-// after the first upload. Opt-out so a later run can discriminate the probe
-// readback from the upload copies without a rebuild (default keeps it on).
-REXCVAR_DEFINE_BOOL(deko3d_upload_probe_frame, true, "GPU/deko3d",
-                    "Record the 64x64 frame-path upload readback into the frame list. Set false "
-                    "to A/B whether the probe readback itself is the fatal GPU command.")
+// Run-073: the frame-path probe records a copyImageToBuffer into the frame list
+// after the first upload. Default OFF for run-073 so the barrier/sampling-delay
+// test is not confounded by the probe's own 2D readback; re-enable once the
+// queue error is gone (run-074) to prove the upload landed.
+REXCVAR_DEFINE_BOOL(deko3d_upload_probe_frame, false, "GPU/deko3d",
+                    "Record the 64x64 frame-path upload readback into the frame list. Off for "
+                    "run-073 (discriminator); re-enable to prove the upload lands pixels.")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
+// Run-073: one-frame sampling delay - bind an uploaded image only from the frame
+// AFTER its copy's frame was submitted/kicked. Rules out read-while-write on the
+// same submit. Set false to A/B the old immediate binding.
+REXCVAR_DEFINE_BOOL(deko3d_upload_defer_sampling, true, "GPU/deko3d",
+                    "Bind uploaded texture images only once their copy's frame has been "
+                    "submitted (one-frame delay); depth-skipped images never bind. Run-073 "
+                    "discriminator for the GPU fault on the first sampling frame.")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 // Run-068: descriptors B (imageHeight = total bytes - the run-060 OS-kill DMA if
@@ -301,8 +311,26 @@ class Deko3DTextureCache::TextureImpl final : public Texture {
     }
     image_.initialize(layout_, memory_, 0);
     SetHostMemoryUsage(aligned);
+    // Run-073: full creation parameters, so a GPU fault on sampling can be
+    // correlated with one specific image's flags/tiling/format.
+    static uint32_t logged_creations = 0;
+    if (logged_creations < 12) {
+      ++logged_creations;
+      REXGPU_WARN("[tex-image] created {}x{}x{} fmt={} type={} flags=0x{:X} layout-size={} "
+                  "align={} mem={} gpu=0x{:X}",
+                  width, height, depth, uint32_t(format), uint32_t(type),
+                  uint32_t(DkImageFlags_Usage2DEngine), size, alignment, uint32_t(aligned),
+                  uint64_t(image_.getGpuAddr()));
+    }
     return true;
   }
+
+  // Run-073: the frame submit whose list carries this texture's upload copy.
+  // 0 = never uploaded; UINT64_MAX = upload skipped (depth) - never bind it.
+  // The draw path binds the image only once FrameSubmitEpoch() >= cohort, i.e.
+  // the copy's frame has been submitted and kicked (one-frame sampling delay).
+  uint64_t upload_cohort() const { return upload_cohort_; }
+  void set_upload_cohort(uint64_t cohort) { upload_cohort_ = cohort; }
 
   dk::Image& image() { return image_; }
   DkImageFormat format() const { return format_; }
@@ -322,6 +350,7 @@ class Deko3DTextureCache::TextureImpl final : public Texture {
   uint32_t width_ = 0;
   uint32_t height_ = 0;
   uint32_t depth_ = 1;
+  uint64_t upload_cohort_ = 0;  // run-073: see set_upload_cohort
 };
 
 Deko3DTextureCache::Deko3DTextureCache(const RegisterFile& register_file,
@@ -1285,6 +1314,9 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
         fmt == DkImageFormat_Z24S8 || fmt == DkImageFormat_ZF32_X24S8) {
       static uint32_t skipped_depth = 0;
       ++skipped_depth;
+      // Run-073: a depth image must never be sampled as colour - keep the
+      // placeholder bound forever (cohort UINT64_MAX = never bind).
+      deko_texture.set_upload_cohort(UINT64_MAX);
       rex::NoteHostAction("upload SKIPPED depth xenos%u->deko%u %ux%u", uint32_t(key.format),
                           uint32_t(fmt), deko_texture.width(), deko_texture.height());
       if (skipped_depth <= 8 || (skipped_depth % 64) == 0) {
@@ -1458,7 +1490,24 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
     destination_view.setMipLevels(0, 1);
     const DkImageRect destination_rect{0, 0, 0, width, height, 1};
     frame_cmdbuf->copyBufferToImage(to_image, destination_view, destination_rect);
-    frame_cmdbuf->barrier(DkBarrier_Full, DkInvalidateFlags_Image);
+    // Run-073: this deko3d has no DkBarrier_2DTo3D - the enum is None/Tiles/
+    // Fragments/Primitives/Full, and Full "completes the processing of all
+    // previous commands while disabling command list prefetch", the strongest
+    // ordering available. Invalidate image + descriptor + L2 caches so the 3D
+    // pipe cannot sample stale data after the 2D write. Values logged once.
+    constexpr uint32_t kUploadInvalidate =
+        DkInvalidateFlags_Image | DkInvalidateFlags_Descriptors | DkInvalidateFlags_L2Cache;
+    frame_cmdbuf->barrier(DkBarrier_Full, kUploadInvalidate);
+    static bool logged_barrier = false;
+    if (!logged_barrier) {
+      logged_barrier = true;
+      REXGPU_WARN("[upload] barrier after copy: DkBarrier_Full({}) invalidate=0x{:X} "
+                  "(Image|Descriptors|L2Cache); no DkBarrier_2DTo3D exists in this deko3d",
+                  int(DkBarrier_Full), kUploadInvalidate);
+    }
+    // Run-073: pin the sampling delay - this image may be bound only from the
+    // NEXT frame's recording (FrameSubmitEpoch() >= this cohort).
+    deko_texture.set_upload_cohort(FrameSubmitEpoch() + 1);
     static uint32_t frame_recorded = 0;
     ++frame_recorded;
     rex::NoteHostAction("upload #%u recorded into FRAME list (rowLength=%u imageHeight=%u)",
@@ -1558,8 +1607,10 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
   upload_command_buffer_.copyBufferToImage(source_buffer, destination_view, destination_rect);
   // Drop the GPU's cached image data afterwards: the draws that sample this
   // texture are recorded into a different list, so queue order alone does not
-  // guarantee they see the new texels.
-  upload_command_buffer_.barrier(DkBarrier_Full, DkInvalidateFlags_Image);
+  // guarantee they see the new texels. Run-073: invalidate descriptors + L2 too.
+  upload_command_buffer_.barrier(DkBarrier_Full, DkInvalidateFlags_Image |
+                                                     DkInvalidateFlags_Descriptors |
+                                                     DkInvalidateFlags_L2Cache);
   DkCmdList list = upload_command_buffer_.finishList();
   // Presenter-style submit: submit, do not wait, use the fence only to know when
   // the staging block can be recycled. Queue order orders the copy before every
@@ -1642,6 +1693,8 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
   // Run-070: pin to the cohort (next frame submit), released when a later
   // frame's present fence has signalled - never on age alone.
   deferred_present_epochs.push_back(FrameSubmitEpoch() + 1);
+  // Run-073: same one-frame sampling delay as the frame path.
+  deko_texture.set_upload_cohort(FrameSubmitEpoch() + 1);
   static uint32_t no_wait_logged = 0;
   if (no_wait_logged < 12) {
     ++no_wait_logged;
@@ -1685,6 +1738,25 @@ bool Deko3DTextureCache::GetBoundTexture(uint32_t fetch_constant, bool want_sign
   if (!deko_texture.valid()) {
     return false;
   }
+  // Run-073: the GPU faulted on the frame that first sampled its uploaded
+  // images. Bind an image only once its upload copy's frame has been submitted
+  // and kicked (one-frame delay): FrameSubmitEpoch() >= cohort means the copy
+  // rode a list the queue has already executed in order. A depth-skipped image
+  // (cohort UINT64_MAX) is NEVER bound - sampling ZF32_X24S8 as colour is itself
+  // a fault candidate. cohort 0 = never uploaded -> placeholder.
+  const uint64_t cohort = deko_texture.upload_cohort();
+  if (cohort == UINT64_MAX) {
+    return false;
+  }
+  if (REXCVAR_GET(deko3d_upload_defer_sampling) &&
+      (cohort == 0 || FrameSubmitEpoch() < cohort)) {
+    return false;
+  }
+  rex::NoteHostActionFast("bind tex gpu=0x%llx fmt=%u %ux%u submit-epoch=%llu",
+                          static_cast<unsigned long long>(deko_texture.image().getGpuAddr()),
+                          uint32_t(deko_texture.format()), deko_texture.width(),
+                          deko_texture.height(),
+                          static_cast<unsigned long long>(FrameSubmitEpoch()));
   out.image = &deko_texture.image();
   out.image_type = deko_texture.image_type();
   out.width = deko_texture.width();

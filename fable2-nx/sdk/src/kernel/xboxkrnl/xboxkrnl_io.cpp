@@ -697,32 +697,21 @@ u32 NtReadFile_entry(u32 file_handle, u32 event_handle, mapped_void apc_routine_
       // we have written the info out.
       signal_event = true;
 
-      // Run-072: what the GUEST actually receives, per read, in the host-action
-      // ring (dumped by every exit hook and by the death-watch): the IOSB status
-      // and count written to guest memory, the returned status (PENDING for
-      // async files), and whether the completion APC was queued. A short read
-      // at EOF must be SUCCESS + the real count in the IOSB; if the guest sees
-      // an error here, its asset loader fatal-exits at the menu load.
-      {
-        const std::string_view ruta = file->path();
-        rex::NoteHostActionFast("read '%.*s' off=%llu req=%u got=%u iosb=%#x ret=%#x apc=%u",
-                                int(ruta.size()), ruta.data(),
-                                static_cast<unsigned long long>(desplazamiento), buffer_length,
-                                bytes_read,
-                                io_status_block ? uint32_t(io_status_block->status) : 0xDEADu,
-                                result, apc_queued ? 1u : 0u);
-        if (bytes_read < buffer_length || XFAILED(result)) {
-          static uint32_t logged_short_reads = 0;
-          if (logged_short_reads < 16) {
-            ++logged_short_reads;
-            REXKRNL_WARN("[io] SHORT READ guest-visible: '{}' off={} req={} got={} "
-                         "iosb.status={:#x} iosb.info={} returned={:#x} apc_queued={} "
-                         "ev_signaled={} (EOF short reads are legal: SUCCESS + real count)",
-                         file->path(), desplazamiento, buffer_length, bytes_read,
-                         io_status_block ? uint32_t(io_status_block->status) : 0xDEADu,
-                         io_status_block ? uint32_t(io_status_block->information) : 0, result,
-                         apc_queued, signal_event);
-          }
+      // Run-073: short reads are SETTLED (run-072: iosb.status=0, info=real
+      // count, returned PENDING, APC queued - legal EOF behaviour). The per-read
+      // ring/log flood is removed; only genuine failures are named now.
+      if (XFAILED(result)) {
+        static uint32_t logged_read_fails = 0;
+        if (logged_read_fails < 32) {
+          ++logged_read_fails;
+          REXKRNL_WARN("[io] READ FAILED '{}' off={} req={} got={} iosb.status={:#x} "
+                       "returned={:#x} apc_queued={}",
+                       file->path(), desplazamiento, buffer_length, bytes_read,
+                       io_status_block ? uint32_t(io_status_block->status) : 0xDEADu, result,
+                       apc_queued);
+          rex::NoteHostAction("io READ FAILED '%s' off=%llu st=%#x",
+                              std::string(file->path()).c_str(),
+                              static_cast<unsigned long long>(desplazamiento), result);
         }
       }
     } else {

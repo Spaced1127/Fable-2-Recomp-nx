@@ -691,6 +691,12 @@ Presenter::PaintResult Deko3DPresenter::PaintAndPresentImpl(bool execute_ui_draw
                   "faulted on this frame's work; OS kill expected",
                   impl_->present_count);
       rex::NoteHostAction("gpu-error right after present #%u kick", impl_->present_count);
+      // Run-073: correlate the fault with the frame's images - the ring now
+      // carries the upload records, texture creations and per-draw binds.
+      char actions[2048];
+      if (rex::DumpHostActionsLast(actions, sizeof(actions), 10)) {
+        REXLOG_WARN("[gpu-error] last host actions (frame/image correlation):\n{}", actions);
+      }
     }
   }
   return PaintResult::kPresented;
