@@ -223,13 +223,18 @@ finding: guest mirror pages EMPTY CPU-side = separate M3 source-data fault;
 074/075 zero verdicts corrected as probe artefacts). Run-077 (prologue list)
 was built/staged but NOT run - user unavailable, mode changed to BATCHED-CHANGE.
 
-Current package: **batch-078** (`m1-batch-078`) - prologue list + mid-frame
-overflow cap (128 copies, static-asserted fit) + toolchain static_asserts
-(0x800/0x9/0x28/barrier4/mask0x15) + late mirror re-read at present >= 160
-(the parked source-data thread's single experiment). Verified without a device:
-compiles clean, static asserts, written correctness argument against run-076
-(RUN_PLAN.md). Device verification PENDING - no hardware requested. Procedure
-when the user returns: RUN_PLAN.md; parked threads: PARKED.md.
+Current package: **batch-079** (`m1-batch-079`) - prologue list + mid-frame
+overflow cap (128 copies) + toolchain static_asserts + late mirror re-read at
+present >= 160 + **fence-witnessed ring reset** (static audit find:
+EnsureRecording reset the per-frame rings after a POLL, violating
+ring_buffer.h's "Reset only once the GPU finished" invariant - a real
+CPU-overwrites-GPU-reads race; now a bounded wait, ~5 ms per run-068) +
+**upload_math extracted to a constexpr header, host-tested ALL PASS**
+(sdk/tests/upload_math_test.cpp: alignment sweep 1..2048, pitch/staging incl.
+run-076 sizes, prologue cap, cohort release, bind rule). Verified without a
+device: compiles clean, static asserts, host test executed, written argument
+per change (RUN_PLAN.md). Device verification PENDING - no hardware requested.
+Procedure when the user returns: RUN_PLAN.md; parked threads: PARKED.md.
 
 **Run-067 result, in one line:** the copy-only bisect logged `copy fence TIMEOUT
 after up to 1000 ms` for the tiled destination (flags 0x800, size 2949120, align

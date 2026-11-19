@@ -1,9 +1,17 @@
-# RUN_PLAN - the batch-078 package (one build, all queued fixes)
+# RUN_PLAN - the batch-079 package (one build, all queued fixes)
 
-Build: `m1-batch-078`. NRO SHA-256:
-`B41F1319A2440895CDC09676742FEE9F192AE5463B26690F80F3BEE2410FB649`.
-Status: compiled clean + static-asserted + written argument below; **device
-verification pending** (user unavailable - no hardware requests made).
+Build: `m1-batch-079`. NRO SHA-256:
+`A96507ED7C1040A793113D711E73DD4818A76BC5B70FEB4119793B5156D89C59`
+(supersedes batch-078 `B41F1319...`).
+Status: compiled clean + static-asserted + **host test ALL PASS** + written
+argument below; **device verification pending** (no hardware requests made).
+
+Host test (run-less, executed 2026-11-18, result: ALL PASS):
+```
+wsl g++ -std=c++23 -Wall -Wextra -I sdk/include sdk/tests/upload_math_test.cpp -o /tmp/upload_math_test
+wsl /tmp/upload_math_test
+# upload_math_test: ALL PASS (alignment sweep 1..2048, pitch/staging, prologue cap, cohort release, bind rule)
+```
 
 ## What the package carries
 
@@ -21,7 +29,22 @@ verification pending** (user unavailable - no hardware requests made).
    uploads' guest source pages are re-read CPU-side and compared with their
    upload-time non-zero counts - the single experiment for the parked
    source-data thread (PARKED.md #2).
-5. Kept from earlier runs: one-frame sampling delay, staging cohort pinning
+5. **Fence-witnessed ring reset** (run-079, static audit find):
+   `EnsureRecording` reset the per-frame constant/index/descriptor rings after
+   a POLL of the previous frame's fence - violating `ring_buffer.h`'s own
+   invariant ("Reset() may only be called once the GPU has finished with the
+   previous contents"). A delayed GPU (heavy upload frame) could still be
+   reading descriptors/constants while the CPU reset and overwrote them - a
+   real race and a channel-fault candidate. Now a BOUNDED WAIT
+   (WaitFenceForRetirement, 250 ms): the resolve list is flushed at submit
+   (run-069) so its fence signals in ~5 ms (run-068) - cheap, and it
+   establishes the completion the reset requires. Timeout is logged and
+   recording proceeds (a lost signal must not hang the game).
+6. **upload_math extraction** (run-079): alignment/pitch/staging/cap/cohort/
+   bind rules moved to `rex/graphics/deko3d/upload_math.h` as constexpr, used
+   by texture_cache.cpp (behavior identical), static_asserted in-header, and
+   swept by `sdk/tests/upload_math_test.cpp` on the host (ALL PASS).
+7. Kept from earlier runs: one-frame sampling delay, staging cohort pinning
    (fence-witnessed, never age), depth-format skip + never-bind, w64/h8 image
    alignment, copies-only probe (first 4 uploads), 2x2 matrix at setup,
    guest-output readback (#30/#150), skip census, death-watch + host-action
@@ -53,6 +76,18 @@ verification pending** (user unavailable - no hardware requests made).
 - **Late mirror re-read:** a CPU read of persistent shared memory - no GPU
   involvement, cannot fault the channel; it only ANSWERS the parked question
   (data late vs never), it does not speculate a fix in code.
+- **Fence-witnessed ring reset:** `ring_buffer.h` documents the invariant;
+  the poll-only code did not establish it (the poll's own comment re-derived
+  the retracted "fences never signal" artefact). Run-068 proved these fences
+  signal in ~5 ms once kicked, and run-069 made the resolve list flush at
+  submit - so the bounded wait costs ~5 ms and makes the invariant TRUE.
+  Run-076 exonerated the copies/staging/images; memory races at the frame
+  boundary are the remaining fault class this removes. The wait is the same
+  primitive already used by WaitForPendingList and SubmitAndWaitForReuse.
+- **upload_math extraction:** pure refactor - the constexpr rules are
+  byte-identical to the inline code they replace (host test sweeps them,
+  including the exact run-076 staging sizes 1474560/753664 and the 480->512 /
+  240->256 alignments); static_asserts run on host AND target builds.
 
 ## What to run when back (one package, in this order)
 
@@ -62,7 +97,7 @@ verification pending** (user unavailable - no hardware requests made).
    $dst = "E:\switch\Fable II"
    Copy-Item "$src\fable_2.nro","$src\fable_2.toml","$src\fable2_config.toml" $dst -Force
    (Get-FileHash "$dst\fable_2.nro" -Algorithm SHA256).Hash
-   # must be B41F1319A2440895CDC09676742FEE9F192AE5463B26690F80F3BEE2410FB649
+   # must be A96507ED7C1040A793113D711E73DD4818A76BC5B70FEB4119793B5156D89C59
    ```
 2. Launch full-memory. **Let it run 3+ minutes** (acceptance: 60 s survival).
 3. Return the **whole `logs/` folder as-is, unrenamed, INCLUDING `logs/rex/`**
@@ -82,6 +117,7 @@ verification pending** (user unavailable - no hardware requests made).
 | `[upload] #N ... recorded into the PROLOGUE list` | every upload uses the copy-only path |
 | `[gpu-error] ...` (any of the 3 witnesses) | **F2: does the channel still fault?** absent for 60 s = fix confirmed |
 | `[death-watch] present #N ... gpu error state=no` + last actions | survival cadence + last stage if it dies |
+| `fence wait timed out for previous frame's render list (ring reset)` | ring-reset wait hit its 250 ms bound (GPU delayed/pathological); absent = the wait is cheap and the invariant holds |
 | `[upload-src] guest mirror ... N non-zero of 4096` | mirror content AT upload (run-076: empty) |
 | `[upload-src-late] ... now N (was M) -> DATA ARRIVED LATE / STILL EMPTY` | **parked #2: late vs never** - decides the next fix |
 | `[upload-sync] probe #N ... DATA LANDED / ALL ZERO` | real-data copies land bytes (post-fix) |

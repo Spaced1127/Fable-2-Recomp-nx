@@ -19,6 +19,7 @@
 #include <rex/graphics/deko3d/ring_buffer.h>
 #include <rex/graphics/deko3d/shared_memory.h>
 #include <rex/graphics/deko3d/texture_cache.h>
+#include <rex/graphics/deko3d/upload_math.h>
 #include <rex/cvar.h>
 #include <rex/host_action.h>
 #include <rex/graphics/pipeline/texture/conversion.h>
@@ -197,7 +198,7 @@ constexpr uint32_t kUploadCommandSize = 64 << 10;
 // Each copyBufferToImage + Full barrier is well under 512 bytes of commands;
 // 128 * 512 = 64 KB = the whole block, so the cap is conservative by construction.
 constexpr uint32_t kPrologueCopyCap = 128;
-static_assert(kPrologueCopyCap * 512 <= kUploadCommandSize,
+static_assert(upload_math::PrologueCapFits(kPrologueCopyCap, 512, kUploadCommandSize),
               "prologue cap must fit the command block with margin");
 
 // Run-078: toolchain-drift guards. Every logged flags/extent value in the
@@ -414,8 +415,10 @@ class Deko3DTextureCache::TextureImpl final : public Texture {
     // height is aligned to 8 (GOB height) for safety. The IMAGE and the copy
     // rect use the aligned extent; sampling keeps the logical size (the UV
     // scale logical/aligned is an M3 shader concern, noted in RUN_075.md).
-    aligned_width_ = type == DkImageType_2D ? (width + 63) & ~uint32_t(63) : width;
-    aligned_height_ = type == DkImageType_2D ? (height + 7) & ~uint32_t(7) : height;
+    aligned_width_ =
+        type == DkImageType_2D ? upload_math::AlignedWidth(width) : width;
+    aligned_height_ =
+        type == DkImageType_2D ? upload_math::AlignedHeight(height) : height;
 
     dk::ImageLayoutMaker maker{texture_cache_.device_.device()};
     maker.setFlags(DkImageFlags_Usage2DEngine)
@@ -1712,10 +1715,8 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
       (aligned_h + format_info->block_height - 1) / format_info->block_height;
   const uint32_t aligned_row_bytes = aligned_blocks_wide * bytes_per_block;
   // Source row pitch: pad to a 4096-byte multiple (the proven-good pitch).
-  constexpr uint32_t kSourcePitchAlignment = 4096;
-  const uint32_t source_pitch =
-      (aligned_row_bytes + kSourcePitchAlignment - 1) & ~(kSourcePitchAlignment - 1);
-  const uint32_t staging_bytes = source_pitch * aligned_blocks_high;
+  const uint32_t source_pitch = upload_math::SourcePitch(aligned_row_bytes);
+  const uint32_t staging_bytes = upload_math::StagingBytes(source_pitch, aligned_blocks_high);
 
   const xenos::TextureFormat base_format = GetBaseFormat(key.format);
   const bool block_compressed = base_format == xenos::TextureFormat::k_DXT1 ||
@@ -1744,8 +1745,7 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
   // the imageHeight-units bug - 2.9M rows instead of 720 - fixed in run 061;
   // run 068 proved the corrected descriptor executes and lands the pattern.)
   // Round the block to whole pages as well as covering the padded pitch.
-  const uint32_t staging_size =
-      (staging_bytes + DK_MEMBLOCK_ALIGNMENT - 1) & ~uint32_t(DK_MEMBLOCK_ALIGNMENT - 1);
+  const uint32_t staging_size = upload_math::PageRound(staging_bytes);
   // Owned through a unique_ptr: with deko3d_upload_no_wait the block outlives
   // this call (it is kept until its copy fence is observed), and a UniqueMemBlock
   // is a handle that cannot be moved into a container.
@@ -2055,7 +2055,7 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
     const uint64_t now_present = PresentEpoch();
     uint32_t released = 0;
     for (size_t i = frame_staging.size(); i-- > 0;) {
-      if (now_present >= frame_cohorts[i] + 1) {
+      if (upload_math::CohortReleased(now_present, frame_cohorts[i])) {
         frame_staging.erase(frame_staging.begin() + ptrdiff_t(i));
         frame_cohorts.erase(frame_cohorts.begin() + ptrdiff_t(i));
         ++released;
@@ -2187,7 +2187,7 @@ bool Deko3DTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
     const bool fence_done =
         deferred_fences[i] &&
         PollFence(*deferred_fences[i], "texture staging", retire_fence_stats);
-    const bool witnessed = now_present >= deferred_present_epochs[i] + 1;
+    const bool witnessed = upload_math::CohortReleased(now_present, deferred_present_epochs[i]);
     if (fence_done || witnessed) {
       deferred_fences.erase(deferred_fences.begin() + ptrdiff_t(i));
       deferred_staging.erase(deferred_staging.begin() + ptrdiff_t(i));
@@ -2271,11 +2271,8 @@ bool Deko3DTextureCache::GetBoundTexture(uint32_t fetch_constant, bool want_sign
   // (cohort UINT64_MAX) is NEVER bound - sampling ZF32_X24S8 as colour is itself
   // a fault candidate. cohort 0 = never uploaded -> placeholder.
   const uint64_t cohort = deko_texture.upload_cohort();
-  if (cohort == UINT64_MAX) {
-    return false;
-  }
-  if (REXCVAR_GET(deko3d_upload_defer_sampling) &&
-      (cohort == 0 || FrameSubmitEpoch() < cohort)) {
+  if (!upload_math::BindAllowed(FrameSubmitEpoch(), cohort,
+                                REXCVAR_GET(deko3d_upload_defer_sampling))) {
     return false;
   }
   rex::NoteHostActionFast("bind tex gpu=0x%llx fmt=%u %ux%u submit-epoch=%llu",

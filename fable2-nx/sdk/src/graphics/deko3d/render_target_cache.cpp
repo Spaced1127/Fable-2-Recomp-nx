@@ -193,11 +193,18 @@ bool Deko3DRenderTargetCache::EnsureRecording() {
   // has already met twice, and this is the thread that drives the guest ring:
   // blocking here forever stops the game, not just the renderer.
   if (resolve_pending_) {
-    // Run-059/063: poll instead of waiting here. Fences do signal (run 062), but
-    // this particular one is only a pacing hint for command-memory reuse, and
-    // waiting on it stalled the frame loop when it did not arrive. Recording is
-    // never abandoned; the queue is ordered, so the next list follows the resolve.
-    PollFence(resolve_fence_, "previous frame's render list", resolve_fence_stats_);
+    // Run-079: BOUNDED WAIT, not a poll. This is the frame boundary where the
+    // per-frame constant/index/descriptor rings are Reset() (via the callback
+    // below), and ring_buffer.h's invariant is "Reset() may only be called once
+    // the GPU has finished with the previous contents". The run-059/063
+    // poll-only rule did NOT establish that - it re-derived the retracted
+    // "fences never signal" artefact and left a real race: a delayed GPU (heavy
+    // upload frame) still reading descriptors/constants while the CPU resets
+    // and overwrites them. The resolve list is flushed at submit (run-069), so
+    // its fence signals in ~5 ms (run-068) and this wait is cheap. A timeout is
+    // logged and recording proceeds (a lost signal must not hang the game).
+    WaitFenceForRetirement(resolve_fence_, "previous frame's render list (ring reset)",
+                           resolve_fence_stats_);
     resolve_pending_ = false;
     for (const std::pair<uint32_t, uint32_t>& range : gpu_written_ranges_) {
       shared_memory_.RangeWrittenByGpu(range.first, range.second);
